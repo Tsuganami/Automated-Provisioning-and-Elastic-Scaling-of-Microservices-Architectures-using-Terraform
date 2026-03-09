@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>APS Control Panel</title>
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .pulse { animation: pulse 2s infinite; }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.6} }
+    </style>
+</head>
+<body class="bg-gray-900 text-white p-8">
+    <div class="max-w-4xl mx-auto">
+        <h1 class="text-3xl font-bold mb-2 text-blue-400">Scaling Engine Dashboard</h1>
+        <p class="text-gray-500 mb-6">Real-time instance monitoring &mdash; <span id="clock"></span></p>
+
+        <!-- Summary -->
+        <div class="mb-8 flex gap-6">
+            <div class="bg-gray-800 border border-gray-700 rounded-lg px-6 py-3 text-center">
+                <div class="text-gray-400 text-xs uppercase tracking-wide">Instances</div>
+                <div id="instance-count" class="text-2xl font-bold text-blue-400">-</div>
+            </div>
+            <div class="bg-gray-800 border border-gray-700 rounded-lg px-6 py-3 text-center">
+                <div class="text-gray-400 text-xs uppercase tracking-wide">Status</div>
+                <div class="text-2xl font-bold text-green-400 pulse">LIVE</div>
+            </div>
+        </div>
+
+        <!-- Instance Cards (auto-refresh via htmx) -->
+        <div id="status-grid" hx-get="/api/status" hx-trigger="every 5s" hx-swap="innerHTML">
+            <p class="text-gray-400 animate-pulse">Loading cluster state...</p>
+        </div>
+
+        <!-- System Config -->
+        <div class="mt-8 p-4 bg-gray-800 rounded-lg border border-gray-700">
+            <h2 class="text-xl font-semibold mb-2">System Config</h2>
+            <div class="grid grid-cols-3 gap-4 text-sm text-gray-300">
+                <div>Threshold Up: <span class="text-red-400">70%</span></div>
+                <div>Threshold Down: <span class="text-green-400">30%</span></div>
+                <div>Cooldown: <span class="text-yellow-400">3m</span></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function updateClock() {
+            document.getElementById('clock').textContent = new Date().toLocaleTimeString();
+        }
+        function fetchSummary() {
+            fetch('/api/summary')
+                .then(r => r.json())
+                .then(data => {
+                    document.getElementById('instance-count').textContent = data.instance_count;
+                })
+                .catch(() => {});
+        }
+        updateClock();
+        fetchSummary();
+        setInterval(updateClock, 1000);
+        setInterval(fetchSummary, 5000);
+    </script>
+</body>
+</html>
