@@ -22,10 +22,18 @@ resource "aws_instance" "app_server" {
                   "runtime"
                   "strconv"
                   "strings"
+                  "sync"
                   "time"
               )
+              
+              var requestCounter = 0
+              var counterMutex = &sync.Mutex{}
 
               func workHandler(w http.ResponseWriter, r *http.Request) {
+                  counterMutex.Lock()
+                  requestCounter++
+                  counterMutex.Unlock()
+                  
                   done := make(chan int)
                   for i := 0; i < runtime.NumCPU(); i++ {
                       go func() {
@@ -44,16 +52,36 @@ resource "aws_instance" "app_server" {
               }
 
               func metricsHandler(w http.ResponseWriter, r *http.Request) {
+                  counterMutex.Lock()
+                  requests := requestCounter
+                  counterMutex.Unlock()
+                  
                   data, _ := os.ReadFile("/proc/loadavg")
                   parts := strings.Split(string(data), " ")
                   load, _ := strconv.ParseFloat(parts[0], 64)
                   cpuPercent := (load / float64(runtime.NumCPU())) * 100
-                  fmt.Fprintf(w, "cpu_utilization %.2f", cpuPercent)
+                  
+                  // REQ-6.1: Return metrics in Prometheus format
+                  w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+                  fmt.Fprintf(w, "# HELP cpu_utilization CPU utilization percentage\n")
+                  fmt.Fprintf(w, "# TYPE cpu_utilization gauge\n")
+                  fmt.Fprintf(w, "cpu_utilization %.2f\n", cpuPercent)
+                  fmt.Fprintf(w, "# HELP request_count Total number of requests processed\n")
+                  fmt.Fprintf(w, "# TYPE request_count counter\n")
+                  fmt.Fprintf(w, "request_count %d\n", requests)
+              }
+              
+              // REQ-5.1: Health check endpoint
+              func healthHandler(w http.ResponseWriter, r *http.Request) {
+                  w.Header().Set("Content-Type", "application/json")
+                  w.WriteHeader(http.StatusOK)
+                  fmt.Fprintf(w, "{\"status\":\"healthy\",\"hostname\":\"%s\"}", os.Getenv("HOSTNAME"))
               }
 
               func main() {
                   http.HandleFunc("/work", workHandler)
                   http.HandleFunc("/metrics", metricsHandler)
+                  http.HandleFunc("/health", healthHandler)  // REQ-5.1
                   http.ListenAndServe(":8080", nil)
               }
               GOEOF
