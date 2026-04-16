@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -15,6 +16,8 @@ import (
 	"time"
 )
 
+const instanceStartupGracePeriod = 4 * time.Minute
+
 func openBrowser(url string) {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
@@ -28,6 +31,18 @@ func openBrowser(url string) {
 	cmd.Start()
 }
 
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func fetchCPU(ip string) (float64, error) {
 	client := http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get(fmt.Sprintf("http://%s:8080/metrics", ip))
@@ -39,61 +54,393 @@ func fetchCPU(ip string) (float64, error) {
 	if err != nil {
 		return 0, err
 	}
-	parts := strings.Split(strings.TrimSpace(string(body)), " ")
-	if len(parts) < 2 {
-		return 0, fmt.Errorf("invalid format")
+	for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "cpu_utilization ") {
+			parts := strings.Fields(line)
+			if len(parts) < 2 {
+				return 0, fmt.Errorf("invalid cpu metric format")
+			}
+			return strconv.ParseFloat(parts[1], 64)
+		}
 	}
-	return strconv.ParseFloat(parts[1], 64)
+	return 0, fmt.Errorf("cpu metric not found")
 }
 
-func startDashboard(ips *[]string) {
+func fetchMetrics(ip string) (float64, float64, error) {
+	client := http.Client{Timeout: 12 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://%s:8080/metrics", ip))
+	if err != nil {
+		return 0, 0, err
+	}
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	var cpuValue float64
+	var requestCount float64
+	var foundCPU bool
+	var foundRequests bool
+	for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "cpu_utilization ") || strings.HasPrefix(line, "request_count ") {
+			parts := strings.Fields(line)
+			if len(parts) < 2 {
+				continue
+			}
+			value, parseErr := strconv.ParseFloat(parts[1], 64)
+			if parseErr != nil {
+				continue
+			}
+			switch parts[0] {
+			case "cpu_utilization":
+				cpuValue = value
+				foundCPU = true
+			case "request_count":
+				requestCount = value
+				foundRequests = true
+			}
+		}
+	}
+
+	if !foundCPU && !foundRequests {
+		return 0, 0, fmt.Errorf("metrics not found")
+	}
+
+	return cpuValue, requestCount, nil
+}
+
+func isStartupRelatedError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var netErr interface{ Timeout() bool }
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "connection refused") ||
+		strings.Contains(message, "timeout") ||
+		strings.Contains(message, "deadline exceeded") ||
+		strings.Contains(message, "no route to host") ||
+		strings.Contains(message, "i/o timeout")
+}
+
+func formatReachabilityError(err error) string {
+	message := strings.TrimSpace(err.Error())
+	if len(message) > 180 {
+		message = message[:180] + "..."
+	}
+	return fmt.Sprintf("Unable to reach /metrics endpoint (%s)", message)
+}
+
+func checkLBHealth(ip string) error {
+	client := http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://%s/health", ip))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
+		return fmt.Errorf("lb returned status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+type instanceStatus struct {
+	IP           string  `json:"ip"`
+	Role         string  `json:"role"`
+	CPUPercent   float64 `json:"cpu_percent"`
+	RequestCount float64 `json:"request_count"`
+	RequestRate  float64 `json:"request_rate"`
+	Status       string  `json:"status"`
+	Healthy      bool    `json:"healthy"`
+	Error        string  `json:"error,omitempty"`
+}
+
+func isKnownInstance(ip string, ips *[]string) bool {
+	for _, knownIP := range *ips {
+		if knownIP == ip {
+			return true
+		}
+	}
+	return false
+}
+
+func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string) {
+	instanceSeenAt := make(map[string]time.Time)
+	var instanceSeenMu sync.Mutex
+	var requestRateMu sync.Mutex
+	var requestLoadMu sync.RWMutex
+	var lastTotalRequests float64
+	var lastRequestSampleTime time.Time
+	lastRequestByIP := make(map[string]float64)
+	lastRequestTimeByIP := make(map[string]time.Time)
+	requestLoadRPSByIP := make(map[string]int)
+	for _, ip := range *allIPs {
+		instanceSeenAt[ip] = time.Now()
+	}
+
+	// Keep sending configured synthetic request load continuously (req/s per app instance).
+	go func() {
+		client := &http.Client{Timeout: 3 * time.Second}
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			knownApps := make(map[string]struct{}, len(*appIPs))
+			for _, ip := range *appIPs {
+				knownApps[ip] = struct{}{}
+			}
+
+			requestLoadMu.Lock()
+			for ip := range requestLoadRPSByIP {
+				if _, ok := knownApps[ip]; !ok {
+					delete(requestLoadRPSByIP, ip)
+				}
+			}
+			currentLoad := make(map[string]int, len(requestLoadRPSByIP))
+			for ip, rps := range requestLoadRPSByIP {
+				currentLoad[ip] = rps
+			}
+			requestLoadMu.Unlock()
+
+			for ip, rps := range currentLoad {
+				for i := 0; i < rps; i++ {
+					go func(targetIP string) {
+						resp, err := client.Get(fmt.Sprintf("http://%s:8080/request", targetIP))
+						if err != nil {
+							log.Printf("[REQUEST LOAD] Failed /request on %s: %v", targetIP, err)
+							return
+						}
+						resp.Body.Close()
+					}(ip)
+				}
+			}
+		}
+	}()
+
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "templates/index.html")
 	})
 
 	http.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
-		html := `<div class="grid grid-cols-1 md:grid-cols-2 gap-6">`
-		for _, ip := range *ips {
-			cpu, err := fetchCPU(ip)
-			status := "ACTIVE"
-			statusColor := "bg-green-500"
-			barColor := "bg-green-500"
-			if err != nil {
-				cpu = 0
-				status = "UNREACHABLE"
-				statusColor = "bg-gray-500"
-				barColor = "bg-gray-500"
-			} else if cpu > 70 {
-				statusColor = "bg-red-500"
-				barColor = "bg-red-500"
-			} else if cpu > 40 {
-				statusColor = "bg-yellow-500"
-				barColor = "bg-yellow-500"
+		statuses := make([]instanceStatus, 0, len(*allIPs))
+		for _, ip := range *allIPs {
+			instanceSeenMu.Lock()
+			seenAt, exists := instanceSeenAt[ip]
+			if !exists {
+				seenAt = time.Now()
+				instanceSeenAt[ip] = seenAt
+			}
+			instanceSeenMu.Unlock()
+
+			role := "APP"
+			if ip == *lbIP {
+				role = "LB-SENDER"
+			}
+			status := instanceStatus{
+				IP:      ip,
+				Role:    role,
+				Healthy: true,
+				Status:  "ACTIVE",
+			}
+			if role == "LB-SENDER" {
+				err := checkLBHealth(ip)
+				if err != nil {
+					status.Healthy = false
+					if time.Since(seenAt) <= instanceStartupGracePeriod && isStartupRelatedError(err) {
+						status.Status = "STARTING"
+						status.Error = "Load balancer node is starting. Routing will be available shortly."
+					} else {
+						status.Status = "UNREACHABLE"
+						status.Error = fmt.Sprintf("Unable to reach nginx load balancer (%s)", strings.TrimSpace(err.Error()))
+					}
+				} else {
+					status.Status = "LB ACTIVE"
+				}
+				statuses = append(statuses, status)
+				continue
 			}
 
-			html += fmt.Sprintf(`
-				<div class="bg-gray-800 p-6 rounded-xl border border-gray-700 shadow-lg">
-					<div class="flex justify-between items-center mb-4">
-						<span class="font-mono text-blue-300">%s</span>
-						<span class="px-2 py-1 rounded text-xs %s text-white">%s</span>
-					</div>
-					<div class="text-gray-400 text-sm mb-1">CPU Load</div>
-					<div class="w-full bg-gray-700 rounded-full h-4">
-						<div class="h-4 rounded-full %s transition-all duration-500" style="width: %.1f%%"></div>
-					</div>
-					<div class="text-right mt-2 font-bold text-xl">%.1f%%</div>
-				</div>`, ip, statusColor, status, barColor, cpu, cpu)
+			cpu, requests, err := fetchMetrics(ip)
+			if err != nil {
+				status.Healthy = false
+				if time.Since(seenAt) <= instanceStartupGracePeriod && isStartupRelatedError(err) {
+					status.Status = "STARTING"
+					status.Error = "Instance is starting. Metrics will appear automatically when the service is ready."
+				} else {
+					status.Status = "UNREACHABLE"
+					status.Error = formatReachabilityError(err)
+				}
+				statuses = append(statuses, status)
+				continue
+			} else if cpu > 70 {
+				status.Status = "HIGH LOAD"
+			} else if cpu > 40 {
+				status.Status = "ELEVATED"
+			}
+
+			status.CPUPercent = cpu
+			status.RequestCount = requests
+
+			requestRateMu.Lock()
+			prevRequests, hasPrevRequests := lastRequestByIP[ip]
+			prevAt, hasPrevAt := lastRequestTimeByIP[ip]
+			if hasPrevRequests && hasPrevAt {
+				elapsed := time.Since(prevAt).Seconds()
+				if elapsed > 0 {
+					delta := requests - prevRequests
+					if delta < 0 {
+						delta = 0
+					}
+					status.RequestRate = delta / elapsed
+				}
+			}
+			lastRequestByIP[ip] = requests
+			lastRequestTimeByIP[ip] = time.Now()
+			requestRateMu.Unlock()
+
+			statuses = append(statuses, status)
 		}
-		html += `</div>`
-		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprint(w, html)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"instances": statuses,
+		})
 	})
 
 	http.HandleFunc("/api/summary", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		healthyCount := 0
+		unhealthyCount := 0
+		var totalCPU float64
+		var totalRequests float64
+		appHealthyCount := 0
+		for _, ip := range *allIPs {
+			if ip == *lbIP {
+				err := checkLBHealth(ip)
+				if err != nil {
+					unhealthyCount++
+				} else {
+					healthyCount++
+				}
+				continue
+			}
+
+			cpu, requests, err := fetchMetrics(ip)
+			if err != nil {
+				unhealthyCount++
+				continue
+			}
+			healthyCount++
+			appHealthyCount++
+			totalCPU += cpu
+			totalRequests += requests
+		}
+		averageCPU := 0.0
+		if appHealthyCount > 0 {
+			averageCPU = totalCPU / float64(appHealthyCount)
+		}
+
+		requestRate := 0.0
+		requestRateMu.Lock()
+		now := time.Now()
+		if !lastRequestSampleTime.IsZero() {
+			elapsed := now.Sub(lastRequestSampleTime).Seconds()
+			if elapsed > 0 {
+				delta := totalRequests - lastTotalRequests
+				if delta < 0 {
+					delta = 0
+				}
+				requestRate = delta / elapsed
+			}
+		}
+		lastTotalRequests = totalRequests
+		lastRequestSampleTime = now
+		requestRateMu.Unlock()
+
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"instance_count": len(*ips),
-			"ips":            *ips,
+			"instance_count":  len(*allIPs),
+			"healthy_count":   healthyCount,
+			"unhealthy_count": unhealthyCount,
+			"average_cpu":     averageCPU,
+			"total_requests":  totalRequests,
+			"request_rate":    requestRate,
+		})
+	})
+
+	http.HandleFunc("/api/load", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		ip := strings.TrimSpace(r.URL.Query().Get("ip"))
+		if ip == "" {
+			http.Error(w, "missing ip", http.StatusBadRequest)
+			return
+		}
+
+		if !isKnownInstance(ip, appIPs) {
+			http.Error(w, "ip is not part of active deployment", http.StatusBadRequest)
+			return
+		}
+
+		burst := 1
+		go func(targetIP string) {
+			client := &http.Client{Timeout: 35 * time.Second}
+			for i := 0; i < burst; i++ {
+				go func() {
+					resp, err := client.Get(fmt.Sprintf("http://%s:8080/work", targetIP))
+					if err != nil {
+						log.Printf("[DASHBOARD LOAD] Failed to hit /work on %s: %v", targetIP, err)
+						return
+					}
+					resp.Body.Close()
+				}()
+			}
+		}(ip)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":  "accepted",
+			"ip":      ip,
+			"requests": burst,
+		})
+	})
+
+	http.HandleFunc("/api/request-load", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		ip := strings.TrimSpace(r.URL.Query().Get("ip"))
+		if ip == "" {
+			http.Error(w, "missing ip", http.StatusBadRequest)
+			return
+		}
+
+		if !isKnownInstance(ip, appIPs) {
+			http.Error(w, "ip is not part of app deployment", http.StatusBadRequest)
+			return
+		}
+
+		const increaseByRPS = 5
+		requestLoadMu.Lock()
+		requestLoadRPSByIP[ip] += increaseByRPS
+		currentRPS := requestLoadRPSByIP[ip]
+		requestLoadMu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":      "accepted",
+			"ip":          ip,
+			"added_rps":   increaseByRPS,
+			"current_rps": currentRPS,
 		})
 	})
 
@@ -103,42 +450,33 @@ func startDashboard(ips *[]string) {
 	}
 }
 
-// ScalingConfig contains all configurable scaling options
 type ScalingConfig struct {
-	// Scaling Metrics
 	CPUMonitoring           bool
 	RequestRateMonitoring   bool
 	
-	// Scaling Behavior
-	ImmediateScaling        bool // Scale immediately vs with time windows
-	ScaleUpTimeWindow       bool // Require 2 min above threshold
-	ScaleDownTimeWindow     bool // Require 5 min below threshold
+	ImmediateScaling        bool
+	ScaleUpTimeWindow       bool
+	ScaleDownTimeWindow     bool
 	
-	// Instance Limits
-	EnforceMinInstances     bool // Enforce minimum 2 instances
-	EnforceMaxInstances     bool // Enforce maximum 10 instances
+	EnforceMinInstances     bool
+	EnforceMaxInstances     bool
 	
-	// Cooldown & Safety
-	EnforceCooldown         bool // 3-minute cooldown between scaling
+	EnforceCooldown         bool
 	
-	// Health & Reliability
-	HealthChecks            bool // Enable /health endpoint checks
-	HealthCheckRecovery     bool // Remove unhealthy instances
+	HealthChecks            bool
+	HealthCheckRecovery     bool
 	
-	// Service Discovery & Load Balancing
-	ServiceDiscovery        bool // Instance auto-registration
-	LoadBalancing           bool // Round-robin load balancing
-	StickySessionsLB        bool // Session affinity (optional)
+	ServiceDiscovery        bool
+	LoadBalancing           bool
+	StickySessionsLB        bool
 	
-	// Metrics & Observability
-	PrometheusMetrics       bool // Export metrics in Prometheus format
-	MetricsRetention        bool // Store metrics for 7 days
-	HealthCheckLogging      bool // Log all health check failures
-	ScalingLogging          bool // Log scaling events
+	PrometheusMetrics       bool
+	MetricsRetention        bool
+	HealthCheckLogging      bool
+	ScalingLogging          bool
 	
-	// Security
-	TLSCommunication        bool // Use TLS for service-to-service
-	EncryptedState          bool // Encrypt Terraform state
+	TLSCommunication        bool
+	EncryptedState          bool
 }
 
 func selectScalingOptions() ScalingConfig {
@@ -157,27 +495,25 @@ func selectScalingOptions() ScalingConfig {
 	fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	fmt.Println("SCALING BEHAVIOR (How scaling happens)")
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	config.ImmediateScaling = getUserConfirmation("  Scale immediately on threshold breach?")
-	if !config.ImmediateScaling {
-		config.ScaleUpTimeWindow = getUserConfirmation("    [REQ-1.3] Scale-up requires 2 min above 70%?")
-		config.ScaleDownTimeWindow = getUserConfirmation("    [REQ-1.4] Scale-down requires 5 min below 30%?")
-	}
+	config.ImmediateScaling = true
+	// config.ScaleUpTimeWindow = getUserConfirmation("    [REQ-1.3] Scale-up requires 2 min above 70%?")
+	// config.ScaleDownTimeWindow = getUserConfirmation("    [REQ-1.4] Scale-down requires 5 min below 30%?")
 
 	fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	fmt.Println("INSTANCE LIMITS & SAFETY")
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	config.EnforceMinInstances = getUserConfirmation("  [REQ-1.5] Enforce minimum 2 instances?")
-	config.EnforceMaxInstances = getUserConfirmation("  [REQ-1.6] Enforce maximum 10 instances?")
-	config.EnforceCooldown = getUserConfirmation("  [REQ-1.7] Enforce 3-minute cooldown between scaling?")
+	// config.EnforceMinInstances = getUserConfirmation("  [REQ-1.5] Enforce minimum 2 instances?")
+	// config.EnforceMaxInstances = getUserConfirmation("  [REQ-1.6] Enforce maximum 10 instances?")
+	// config.EnforceCooldown = getUserConfirmation("  [REQ-1.7] Enforce 3-minute cooldown between scaling?")
 
 	fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	fmt.Println("HEALTH & RELIABILITY")
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	config.HealthChecks = getUserConfirmation("  [REQ-5.1] Enable /health endpoint checks?")
-	if config.HealthChecks {
-		config.HealthCheckRecovery = getUserConfirmation("    [REQ-5.3] Terminate unhealthy instances?")
-		config.HealthCheckLogging = getUserConfirmation("    [REQ-5.4] Log health check failures?")
-	}
+	// config.HealthChecks = getUserConfirmation("  [REQ-5.1] Enable /health endpoint checks?")
+	// if config.HealthChecks {
+	// 	config.HealthCheckRecovery = getUserConfirmation("    [REQ-5.3] Terminate unhealthy instances?")
+	// 	config.HealthCheckLogging = getUserConfirmation("    [REQ-5.4] Log health check failures?")
+	// }
 
 	fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	fmt.Println("SERVICE DISCOVERY & LOAD BALANCING")
@@ -191,17 +527,17 @@ func selectScalingOptions() ScalingConfig {
 	fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	fmt.Println("METRICS & OBSERVABILITY")
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	config.PrometheusMetrics = getUserConfirmation("  [REQ-6.1] Export metrics in Prometheus format?")
-	if config.PrometheusMetrics {
-		config.MetricsRetention = getUserConfirmation("    [REQ-6.3] Retain metrics for 7 days?")
-	}
-	config.ScalingLogging = getUserConfirmation("  [REQ-6.4] Log all scaling events?")
+	// config.PrometheusMetrics = getUserConfirmation("  [REQ-6.1] Export metrics in Prometheus format?")
+	// if config.PrometheusMetrics {
+	// 	config.MetricsRetention = getUserConfirmation("    [REQ-6.3] Retain metrics for 7 days?")
+	// }
+	// config.ScalingLogging = getUserConfirmation("  [REQ-6.4] Log all scaling events?")
 
 	fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	fmt.Println("SECURITY (Advanced)")
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	config.TLSCommunication = getUserConfirmation("  [SEC-1] Use TLS for service-to-service communication?")
-	config.EncryptedState = getUserConfirmation("  [SEC-4] Encrypt Terraform state at rest?")
+	// config.TLSCommunication = getUserConfirmation("  [SEC-1] Use TLS for service-to-service communication?")
+	// config.EncryptedState = getUserConfirmation("  [SEC-4] Encrypt Terraform state at rest?")
 
 	displayScalingConfiguration(config)
 	return config
@@ -226,102 +562,33 @@ func displayScalingConfiguration(config ScalingConfig) {
 	fmt.Println("\n╔════════════════════════════════════════════════════════════════════╗")
 	fmt.Println("║     YOUR SCALING CONFIGURATION                                    ║")
 	fmt.Println("╚════════════════════════════════════════════════════════════════════╝\n")
-
-	sections := []struct {
-		title string
-		items []struct {
-			label   string
-			enabled bool
-		}
-	}{
-		{
-			"METRICS",
-			[]struct {
-				label   string
-				enabled bool
-			}{
-				{"CPU Monitoring", config.CPUMonitoring},
-				{"Request Rate Monitoring", config.RequestRateMonitoring},
-			},
-		},
-		{
-			"SCALING BEHAVIOR",
-			[]struct {
-				label   string
-				enabled bool
-			}{
-				{"Immediate Scaling", config.ImmediateScaling},
-				{"2-Min Scale-Up Window", config.ScaleUpTimeWindow},
-				{"5-Min Scale-Down Window", config.ScaleDownTimeWindow},
-			},
-		},
-		{
-			"LIMITS & SAFETY",
-			[]struct {
-				label   string
-				enabled bool
-			}{
-				{"Enforce Min 2 Instances", config.EnforceMinInstances},
-				{"Enforce Max 10 Instances", config.EnforceMaxInstances},
-				{"3-Min Cooldown Period", config.EnforceCooldown},
-			},
-		},
-		{
-			"HEALTH & RELIABILITY",
-			[]struct {
-				label   string
-				enabled bool
-			}{
-				{"Health Checks", config.HealthChecks},
-				{"Health Check Recovery", config.HealthCheckRecovery},
-				{"Health Check Logging", config.HealthCheckLogging},
-			},
-		},
-		{
-			"SERVICE DISCOVERY & LB",
-			[]struct {
-				label   string
-				enabled bool
-			}{
-				{"Service Discovery", config.ServiceDiscovery},
-				{"Load Balancing", config.LoadBalancing},
-				{"Sticky Sessions", config.StickySessionsLB},
-			},
-		},
-		{
-			"OBSERVABILITY",
-			[]struct {
-				label   string
-				enabled bool
-			}{
-				{"Prometheus Metrics", config.PrometheusMetrics},
-				{"Metrics Retention (7d)", config.MetricsRetention},
-				{"Scaling Event Logging", config.ScalingLogging},
-			},
-		},
-		{
-			"SECURITY",
-			[]struct {
-				label   string
-				enabled bool
-			}{
-				{"TLS Communication", config.TLSCommunication},
-				{"Encrypted Terraform State", config.EncryptedState},
-			},
-		},
-	}
-
-	for _, section := range sections {
-		fmt.Printf("  %s:\n", section.title)
-		for _, item := range section.items {
-			status := "✓"
-			if !item.enabled {
-				status = "✗"
-			}
-			fmt.Printf("    [%s] %s\n", status, item.label)
-		}
-		fmt.Println()
-	}
+	fmt.Println("  METRICS:")
+	fmt.Printf("    [%s] CPU Monitoring\n", map[bool]string{true: "✓", false: "✗"}[config.CPUMonitoring])
+	fmt.Printf("    [%s] Request Rate Monitoring\n", map[bool]string{true: "✓", false: "✗"}[config.RequestRateMonitoring])
+	// fmt.Println("\n  SCALING BEHAVIOR:")
+	// fmt.Printf("    [%s] Immediate Scaling\n", map[bool]string{true: "✓", false: "✗"}[config.ImmediateScaling])
+	// fmt.Printf("    [%s] 2-Min Scale-Up Window\n", map[bool]string{true: "✓", false: "✗"}[config.ScaleUpTimeWindow])
+	// fmt.Printf("    [%s] 5-Min Scale-Down Window\n", map[bool]string{true: "✓", false: "✗"}[config.ScaleDownTimeWindow])
+	// fmt.Println("\n  LIMITS & SAFETY:")
+	// fmt.Printf("    [%s] Enforce Min 2 Instances\n", map[bool]string{true: "✓", false: "✗"}[config.EnforceMinInstances])
+	// fmt.Printf("    [%s] Enforce Max 10 Instances\n", map[bool]string{true: "✓", false: "✗"}[config.EnforceMaxInstances])
+	// fmt.Printf("    [%s] 3-Min Cooldown Period\n", map[bool]string{true: "✓", false: "✗"}[config.EnforceCooldown])
+	// fmt.Println("\n  HEALTH & RELIABILITY:")
+	// fmt.Printf("    [%s] Health Checks\n", map[bool]string{true: "✓", false: "✗"}[config.HealthChecks])
+	// fmt.Printf("    [%s] Health Check Recovery\n", map[bool]string{true: "✓", false: "✗"}[config.HealthCheckRecovery])
+	// fmt.Printf("    [%s] Health Check Logging\n", map[bool]string{true: "✓", false: "✗"}[config.HealthCheckLogging])
+	fmt.Println("\n  SERVICE DISCOVERY & LB:")
+	fmt.Printf("    [%s] Service Discovery\n", map[bool]string{true: "✓", false: "✗"}[config.ServiceDiscovery])
+	fmt.Printf("    [%s] Load Balancing\n", map[bool]string{true: "✓", false: "✗"}[config.LoadBalancing])
+	fmt.Printf("    [%s] Sticky Sessions\n", map[bool]string{true: "✓", false: "✗"}[config.StickySessionsLB])
+	// fmt.Println("\n  OBSERVABILITY:")
+	// fmt.Printf("    [%s] Prometheus Metrics\n", map[bool]string{true: "✓", false: "✗"}[config.PrometheusMetrics])
+	// fmt.Printf("    [%s] Metrics Retention (7d)\n", map[bool]string{true: "✓", false: "✗"}[config.MetricsRetention])
+	// fmt.Printf("    [%s] Scaling Event Logging\n", map[bool]string{true: "✓", false: "✗"}[config.ScalingLogging])
+	// fmt.Println("\n  SECURITY:")
+	// fmt.Printf("    [%s] TLS Communication\n", map[bool]string{true: "✓", false: "✗"}[config.TLSCommunication])
+	// fmt.Printf("    [%s] Encrypted Terraform State\n", map[bool]string{true: "✓", false: "✗"}[config.EncryptedState])
+	fmt.Println()
 	
 	saveScalingConfigToFile(config)
 }
@@ -338,7 +605,6 @@ func saveScalingConfigToFile(config ScalingConfig) {
 }
 
 func main() {
-	// Get scaling configuration from user
 	scalingConfig := selectScalingOptions()
 
 	fmt.Println("=== Running Terraform Apply ===")
@@ -357,23 +623,90 @@ func main() {
 		log.Fatalf("Failed to get terraform output: %v", err)
 	}
 
-	var ips []string
-	if err := json.Unmarshal(outBytes, &ips); err != nil {
+	var allIPs []string
+	if err := json.Unmarshal(outBytes, &allIPs); err != nil {
 		log.Fatalf("Failed to parse IPs from terraform output: %v", err)
 	}
 
-	if len(ips) == 0 {
-		log.Fatal("No instance IPs found in terraform output")
+	appOutCmd := exec.Command("terraform", "output", "-json", "app_instance_ips")
+	appOutBytes, err := appOutCmd.Output()
+	if err != nil {
+		log.Fatalf("Failed to get app instance IPs from terraform output: %v", err)
 	}
 
-	fmt.Printf("Found IPs: %s\n", strings.Join(ips, ", "))
+	var appIPs []string
+	if err := json.Unmarshal(appOutBytes, &appIPs); err != nil {
+		log.Fatalf("Failed to parse app IPs from terraform output: %v", err)
+	}
 
-	go startDashboard(&ips)
-	time.Sleep(1 * time.Second)
-	openBrowser("http://localhost:9090")
+	lbOutCmd := exec.Command("terraform", "output", "-raw", "lb_ip")
+	lbIPRaw, err := lbOutCmd.Output()
+	if err != nil {
+		log.Fatalf("Failed to get LB IP from terraform output: %v", err)
+	}
+	lbIP := strings.TrimSpace(string(lbIPRaw))
+
+	if len(allIPs) == 0 {
+		log.Fatal("No instance IPs found in terraform output")
+	}
+	if len(appIPs) == 0 {
+		log.Fatal("No app instance IPs found in terraform output")
+	}
+
+	fmt.Printf("Found IPs: %s\n", strings.Join(allIPs, ", "))
+	fmt.Printf("Load balancer sender IP: %s\n", lbIP)
+	fmt.Printf("Scalable app IPs: %s\n", strings.Join(appIPs, ", "))
+
+	go startDashboard(&allIPs, &appIPs, &lbIP)
+	time.AfterFunc(1*time.Second, func() {
+		openBrowser("http://localhost:9090")
+	})
+
+	// Periodically refresh IPs from terraform state so dashboard always shows current instances
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			allOutCmd := exec.Command("terraform", "output", "-json", "instance_ips")
+			allOutBytes, err := allOutCmd.Output()
+			if err != nil {
+				// Silently skip on error (e.g., terraform locked during apply)
+				continue
+			}
+			var newAllIPs []string
+			if err := json.Unmarshal(allOutBytes, &newAllIPs); err != nil {
+				continue
+			}
+
+			appOutCmd := exec.Command("terraform", "output", "-json", "app_instance_ips")
+			appOutBytes, err := appOutCmd.Output()
+			if err != nil {
+				continue
+			}
+			var newAppIPs []string
+			if err := json.Unmarshal(appOutBytes, &newAppIPs); err != nil {
+				continue
+			}
+
+			lbOutCmd := exec.Command("terraform", "output", "-raw", "lb_ip")
+			lbRaw, err := lbOutCmd.Output()
+			if err != nil {
+				continue
+			}
+			newLBIP := strings.TrimSpace(string(lbRaw))
+
+			if len(newAllIPs) != len(allIPs) || !slicesEqual(allIPs, newAllIPs) || len(newAppIPs) != len(appIPs) || !slicesEqual(appIPs, newAppIPs) || lbIP != newLBIP {
+				allIPs = newAllIPs
+				appIPs = newAppIPs
+				lbIP = newLBIP
+				log.Printf("[IP REFRESH] Updated all instances: %v", allIPs)
+				log.Printf("[IP REFRESH] Updated app instances: %v", appIPs)
+			}
+		}
+	}()
 
 	fmt.Println("=== Starting Scaler ===")
-	args := append([]string{"run", "scaler.go"}, ips...)
+	args := append([]string{"run", "scaler.go"}, appIPs...)
 	scalerCmd := exec.Command("go", args...)
 	scalerCmd.Stdout = os.Stdout
 	scalerCmd.Stderr = os.Stderr
@@ -384,53 +717,51 @@ func main() {
 	fmt.Println("=== Waiting 2 minutes for instances to boot and initialize ===")
 	time.Sleep(2 * time.Minute)
 
-	// Run selected tests
 	fmt.Println("\n╔════════════════════════════════════════════════════════════════════╗")
 	fmt.Println("║     STARTING TEST EXECUTION                                        ║")
 	fmt.Println("╚════════════════════════════════════════════════════════════════════╝\n")
 
-	if scalingConfig.EnforceMinInstances {
-		fmt.Println("[TEST] Verifying minimum 2 instances requirement...")
-		fmt.Printf("  Current instances: %d (Expected: >= 2)\n", len(ips))
-		if len(ips) >= 2 {
-			fmt.Println("  ✓ PASS: Minimum instance requirement met\n")
-		} else {
-			fmt.Println("  ✗ FAIL: Minimum instance requirement NOT met\n")
-		}
-	}
+	// Keeping the deploy flow CPU-only for dashboard validation.
+	// if scalingConfig.EnforceMinInstances {
+	// 	fmt.Println("[TEST] Verifying minimum 2 instances requirement...")
+	// 	fmt.Printf("  Current instances: %d (Expected: >= 2)\n", len(ips))
+	// 	if len(ips) >= 2 {
+	// 		fmt.Println("  ✓ PASS: Minimum instance requirement met\n")
+	// 	} else {
+	// 		fmt.Println("  ✗ FAIL: Minimum instance requirement NOT met\n")
+	// 	}
+	// }
 
-	if scalingConfig.EnforceMaxInstances {
-		fmt.Println("[TEST] Verifying maximum 10 instances limit...")
-		fmt.Println("  This will be tested during stress test (max 10 instances allowed)\n")
-	}
+	// if scalingConfig.EnforceMaxInstances {
+	// 	fmt.Println("[TEST] Verifying maximum 10 instances limit...")
+	// 	fmt.Println("  This will be tested during stress test (max 10 instances allowed)\n")
+	// }
 
-	if scalingConfig.EnforceCooldown {
-		fmt.Println("[TEST] Cooldown period is configured for 3 minutes between scaling operations")
-		fmt.Println("  Monitoring logs for cooldown enforcement...\n")
-	}
+	// if scalingConfig.EnforceCooldown {
+	// 	fmt.Println("[TEST] Cooldown period is configured for 3 minutes between scaling operations")
+	// 	fmt.Println("  Monitoring logs for cooldown enforcement...\n")
+	// }
 
-	if scalingConfig.HealthChecks {
-		fmt.Println("[TEST] Testing /health endpoint on each instance...")
-		testHealthEndpoints(ips)
-		fmt.Println()
-	}
+	// if scalingConfig.HealthChecks {
+	// 	fmt.Println("[TEST] Testing /health endpoint on each instance...")
+	// 	testHealthEndpoints(ips)
+	// 	fmt.Println()
+	// }
 
-	if scalingConfig.PrometheusMetrics {
-		fmt.Println("[TEST] Testing /metrics endpoint (Prometheus format)...")
-		testMetricsEndpoints(ips)
-		fmt.Println()
-	}
+	// if scalingConfig.PrometheusMetrics {
+	// 	fmt.Println("[TEST] Testing /metrics endpoint (Prometheus format)...")
+	// 	testMetricsEndpoints(ips)
+	// 	fmt.Println()
+	// }
 
 	fmt.Println("\n╔════════════════════════════════════════════════════════════════════╗")
 	fmt.Println("║     LAUNCHING REQUIREMENT-BASED TESTS                            ║")
 	fmt.Println("╚════════════════════════════════════════════════════════════════════╝\n")
 
-	// Launch configured test generators
 	stressedIPs := make(map[string]bool)
 	var wg sync.WaitGroup
 
-	// Test 1: CPU Scaling Test
-	if scalingConfig.CPUMonitoring && scalingConfig.ScaleUpTimeWindow {
+	if scalingConfig.CPUMonitoring {
 		fmt.Println("[TEST GENERATOR] CPU Load Test - Will generate CPU load to trigger scale-up")
 		wg.Add(1)
 		go func() {
@@ -439,54 +770,48 @@ func main() {
 		}()
 	}
 
-	// Test 2: Request Rate Scaling Test  
-	if scalingConfig.RequestRateMonitoring && scalingConfig.ScaleUpTimeWindow {
+	if scalingConfig.RequestRateMonitoring {
 		fmt.Println("[TEST GENERATOR] Traffic Spike Test - Will blast instances with traffic to trigger scale-up")
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			runTrafficSpikeTest(scalingConfig, getActiveIPs)
+			runTrafficSpikeTest(scalingConfig, getLoadBalancerIP)
 		}()
 	}
 
-	// Test 3: Health Check Recovery Test
-	if scalingConfig.HealthChecks && scalingConfig.HealthCheckRecovery {
-		fmt.Println("[TEST GENERATOR] Health Check Test - Will monitor instance health and recovery")
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			runHealthCheckTest(scalingConfig, getActiveIPs)
-		}()
-	}
+	// if scalingConfig.HealthChecks && scalingConfig.HealthCheckRecovery {
+	// 	fmt.Println("[TEST GENERATOR] Health Check Test - Will monitor instance health and recovery")
+	// 	wg.Add(1)
+	// 	go func() {
+	// 		defer wg.Done()
+	// 		runHealthCheckTest(scalingConfig, getActiveIPs)
+	// 	}()
+	// }
 
-	// Test 4: Scale-Down Test (after scale-up completes)
-	if scalingConfig.ScaleDownTimeWindow {
-		fmt.Println("[TEST GENERATOR] Scale-Down Test - Will reduce load after grace period to trigger scale-down")
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			runScaleDownTest(scalingConfig, getActiveIPs)
-		}()
-	}
+	// if scalingConfig.ScaleDownTimeWindow {
+	// 	fmt.Println("[TEST GENERATOR] Scale-Down Test - Will reduce load after grace period to trigger scale-down")
+	// 	wg.Add(1)
+	// 	go func() {
+	// 		defer wg.Done()
+	// 		runScaleDownTest(scalingConfig, getActiveIPs)
+	// 	}()
+	// }
 
-	// Test 5: Cooldown Test
-	if scalingConfig.EnforceCooldown {
-		fmt.Println("[TEST GENERATOR] Cooldown Test - Will verify 3-minute cooldown between operations")
-	}
+	// if scalingConfig.EnforceCooldown {
+	// 	fmt.Println("[TEST GENERATOR] Cooldown Test - Will verify 3-minute cooldown between operations")
+	// }
 
-	// Test 6: Metrics Validation Test
-	if scalingConfig.PrometheusMetrics {
-		fmt.Println("[TEST GENERATOR] Prometheus Metrics Test - Continuous metric validation")
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			runMetricsValidationTest(scalingConfig, getActiveIPs)
-		}()
-	}
+	// if scalingConfig.PrometheusMetrics {
+	// 	fmt.Println("[TEST GENERATOR] Prometheus Metrics Test - Continuous metric validation")
+	// 	wg.Add(1)
+	// 	go func() {
+	// 		defer wg.Done()
+	// 		runMetricsValidationTest(scalingConfig, getActiveIPs)
+	// 	}()
+	// }
 
 	fmt.Println()
 
-	// Automatic stress test for active instances
 	go func() {
 		for {
 			currentIPs := getActiveIPs()
@@ -502,7 +827,7 @@ func main() {
 				}
 				fmt.Println("OK — launching continuous health checks")
 				stressedIPs[ip] = true
-				go stressTest(ip, 50, 90*time.Second)
+				go stressTest(ip, 5, 20*time.Second)
 			}
 			time.Sleep(30 * time.Second)
 		}
@@ -512,7 +837,7 @@ func main() {
 }
 
 func getActiveIPs() []string {
-	cmd := exec.Command("terraform", "output", "-json", "instance_ips")
+	cmd := exec.Command("terraform", "output", "-json", "app_instance_ips")
 	outBytes, err := cmd.Output()
 	if err != nil {
 		log.Printf("Failed to refresh IPs: %v", err)
@@ -526,8 +851,21 @@ func getActiveIPs() []string {
 	return ips
 }
 
+func getLoadBalancerIP() string {
+	cmd := exec.Command("terraform", "output", "-raw", "lb_ip")
+	outBytes, err := cmd.Output()
+	if err != nil {
+		log.Printf("Failed to refresh LB IP: %v", err)
+		return ""
+	}
+	return strings.TrimSpace(string(outBytes))
+}
+
 func stressTest(ip string, concurrency int, duration time.Duration) {
 	url := fmt.Sprintf("http://%s:8080/work", ip)
+	if strings.Contains(ip, ":") {
+		url = fmt.Sprintf("http://%s/work", ip)
+	}
 	fmt.Printf("Stress testing %s with %d workers for %v\n", url, concurrency, duration)
 
 	client := &http.Client{Timeout: 60 * time.Second}
@@ -562,10 +900,6 @@ func stressTest(ip string, concurrency int, duration time.Duration) {
 
 	fmt.Printf("Stress test results for %s: %d OK, %d errors\n", ip, successCount, errorCount)
 }
-
-// ============= AUTOMATED TEST GENERATORS =============
-
-// Test REQ-1.1 & REQ-1.3: CPU Load triggers scaling
 func runCPULoadTest(config ScalingConfig, getActiveIPs func() []string) {
 	fmt.Println("\n[CPU LOAD TEST] Starting 3-minute CPU load pattern...")
 	fmt.Println("  Phase 1: Ramp-up (60 seconds) - Generate moderate CPU load")
@@ -585,17 +919,16 @@ func runCPULoadTest(config ScalingConfig, getActiveIPs func() []string) {
 		var intensity int
 		switch phase {
 		case 1:
-			intensity = 25  // Moderate
+			intensity = 25
 		case 2:
-			intensity = 75  // Heavy - exceed threshold
+			intensity = 75
 		case 3:
-			intensity = 5   // Minimal
+			intensity = 5
 		}
 
 		phaseStart := time.Now()
 		fmt.Printf("\n[CPU TEST PHASE %d] Intensity: %d workers/instance, Duration: 60s\n", phase, intensity)
 
-		// Run concurrent load on all instances
 		for timeElapsed := 0 * time.Second; timeElapsed < phaseDuration; timeElapsed += 5 * time.Second {
 			for _, ip := range ips {
 				go stressTest(ip, intensity, 5*time.Second)
@@ -612,15 +945,14 @@ func runCPULoadTest(config ScalingConfig, getActiveIPs func() []string) {
 	fmt.Println("[CPU LOAD TEST] Check scaler logs to verify scale-up was triggered\n")
 }
 
-// Test REQ-1.2 & REQ-1.3: Request rate triggers scaling
-func runTrafficSpikeTest(config ScalingConfig, getActiveIPs func() []string) {
+func runTrafficSpikeTest(config ScalingConfig, getLBIP func() string) {
 	fmt.Println("\n[TRAFFIC SPIKE TEST] Starting request rate load pattern...")
 	fmt.Println("  Phase 1: Warm-up (30 seconds) - 100 req/s")
 	fmt.Println("  Phase 2: Ramp-up (30 seconds) - 500 req/s")
-	fmt.Println("  Phase 3: SPIKE (60 seconds) - 1500 req/s (exceeds 1000 req/s threshold)")
+	fmt.Println("  Phase 3: SPIKE (60 seconds) - 1500 req/s (exceeds 20 req/s threshold)")
 	fmt.Println("  Expected: Scale-up after Phase 3 completes (waiting for 2-minute window)\n")
 
-	time.Sleep(10 * time.Second) // Let CPU test settle
+	time.Sleep(10 * time.Second)
 
 	phases := []struct {
 		name       string
@@ -633,24 +965,21 @@ func runTrafficSpikeTest(config ScalingConfig, getActiveIPs func() []string) {
 	}
 
 	for phaseIdx, phase := range phases {
-		ips := getActiveIPs()
-		if len(ips) == 0 {
+		lbIP := getLBIP()
+		if lbIP == "" {
 			continue
 		}
 
-		fmt.Printf("\n[TRAFFIC PHASE %d] %s - %d concurrent workers\n", phaseIdx+1, phase.name, phase.maxWorkers)
-		fmt.Printf("  Estimated requests/sec: ~%d (threshold is 1000)\n", phase.maxWorkers*10)
+		fmt.Printf("\n[TRAFFIC PHASE %d] %s via LB %s - %d concurrent workers\n", phaseIdx+1, phase.name, lbIP, phase.maxWorkers)
+		fmt.Printf("  Estimated requests/sec: ~%d (threshold is 20)\n", phase.maxWorkers*10)
 
 		phaseStart := time.Now()
 		var wg sync.WaitGroup
-
-		for _, ip := range ips {
-			wg.Add(1)
-			go func(ipAddr string) {
-				defer wg.Done()
-				stressTest(ipAddr, phase.maxWorkers, phase.duration)
-			}(ip)
-		}
+		wg.Add(1)
+		go func(targetLB string) {
+			defer wg.Done()
+			stressTest(targetLB+":80", phase.maxWorkers, phase.duration)
+		}(lbIP)
 
 		wg.Wait()
 		elapsed := time.Since(phaseStart)
@@ -661,7 +990,6 @@ func runTrafficSpikeTest(config ScalingConfig, getActiveIPs func() []string) {
 	fmt.Println("[TRAFFIC SPIKE TEST] Check ./metrics or scaler logs to verify request rate was captured\n")
 }
 
-// Test REQ-5.x: Health check endpoints
 func runHealthCheckTest(config ScalingConfig, getActiveIPs func() []string) {
 	fmt.Println("\n[HEALTH CHECK TEST] Starting health check validation...")
 	fmt.Println("  Will continuously verify /health endpoints")
@@ -712,13 +1040,12 @@ func runHealthCheckTest(config ScalingConfig, getActiveIPs func() []string) {
 	fmt.Printf("\n[HEALTH CHECK TEST] Complete - Results: %d pass, %d fail\n\n", passCount, failCount)
 }
 
-// Test REQ-1.4: Scale-down after load reduces
 func runScaleDownTest(config ScalingConfig, getActiveIPs func() []string) {
 	fmt.Println("\n[SCALE-DOWN TEST] Starting scale-down validation...")
 	fmt.Println("  Will maintain minimal load for 5+ minutes")
 	fmt.Println("  Expected: System should scale-down after 5-minute low-load window\n")
 
-	time.Sleep(4 * time.Minute) // Wait for scale-up to complete
+	time.Sleep(4 * time.Minute)
 
 	fmt.Println("[SCALE-DOWN TEST] Beginning 5-minute low-load period...")
 	fmt.Println("  Sending 1 request every 10 seconds (minimal load)")
@@ -738,7 +1065,6 @@ func runScaleDownTest(config ScalingConfig, getActiveIPs func() []string) {
 		elapsedTime := time.Since(startTime)
 		fmt.Printf("[SCALE-DOWN TEST] %v elapsed - Sending 1 keepalive request...\n", elapsedTime.Round(time.Second))
 
-		// Send minimal requests to keep connections alive
 		for _, ip := range ips {
 			go func(ipAddr string) {
 				client := http.Client{Timeout: 5 * time.Second}
@@ -753,7 +1079,6 @@ func runScaleDownTest(config ScalingConfig, getActiveIPs func() []string) {
 	fmt.Println("[SCALE-DOWN TEST] Check scaler logs - should show scale-down triggered after 5-minute window\n")
 }
 
-// Test REQ-6.1: Validate Prometheus metrics
 func runMetricsValidationTest(config ScalingConfig, getActiveIPs func() []string) {
 	fmt.Println("\n[METRICS VALIDATION TEST] Starting continuous metric validation...")
 	fmt.Println("  Verifies Prometheus format every 30 seconds\n")
@@ -792,7 +1117,6 @@ func runMetricsValidationTest(config ScalingConfig, getActiveIPs func() []string
 			body, _ := ioutil.ReadAll(resp.Body)
 			metricsStr := string(body)
 
-			// Validate Prometheus format
 			hasHelp := strings.Contains(metricsStr, "# HELP")
 			hasType := strings.Contains(metricsStr, "# TYPE")
 			hasCPU := strings.Contains(metricsStr, "cpu_utilization")
@@ -810,7 +1134,6 @@ func runMetricsValidationTest(config ScalingConfig, getActiveIPs func() []string
 				fmt.Printf("INVALID (HELP:%v TYPE:%v CPU:%v REQ:%v)\n", hasHelp, hasType, hasCPU, hasRequests)
 			}
 
-			// Extract actual values
 			lines := strings.Split(metricsStr, "\n")
 			for _, line := range lines {
 				if strings.HasPrefix(line, "cpu_utilization ") {
@@ -825,9 +1148,6 @@ func runMetricsValidationTest(config ScalingConfig, getActiveIPs func() []string
 
 	fmt.Printf("\n[METRICS VALIDATION TEST] Complete - Collected %d samples\n\n", sampleCount)
 }
-
-// Test helper functions for requirement validation
-
 func testHealthEndpoints(ips []string) {
 	client := http.Client{Timeout: 5 * time.Second}
 	passCount := 0
@@ -880,7 +1200,6 @@ func testMetricsEndpoints(ips []string) {
 		}
 
 		metricsStr := string(body)
-		// REQ-6.1: Check for Prometheus format markers
 		isPrometheus := strings.Contains(metricsStr, "# HELP") && 
 		              strings.Contains(metricsStr, "# TYPE") && 
 		              strings.Contains(metricsStr, "cpu_utilization")

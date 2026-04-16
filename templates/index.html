@@ -4,62 +4,262 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>APS Control Panel</title>
-    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
+        :root {
+            color-scheme: dark;
+        }
+
+        body {
+            background:
+                radial-gradient(circle at top left, rgba(59, 130, 246, 0.22), transparent 30%),
+                radial-gradient(circle at top right, rgba(16, 185, 129, 0.16), transparent 24%),
+                linear-gradient(180deg, #030712 0%, #0f172a 55%, #020617 100%);
+        }
+
         .pulse { animation: pulse 2s infinite; }
+        .fade-in { animation: fade-in .35s ease-out both; }
+
         @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.6} }
+        @keyframes fade-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
     </style>
 </head>
-<body class="bg-gray-900 text-white p-8">
-    <div class="max-w-4xl mx-auto">
-        <h1 class="text-3xl font-bold mb-2 text-blue-400">Scaling Engine Dashboard</h1>
-        <p class="text-gray-500 mb-6">Real-time instance monitoring &mdash; <span id="clock"></span></p>
-
-        <!-- Summary -->
-        <div class="mb-8 flex gap-6">
-            <div class="bg-gray-800 border border-gray-700 rounded-lg px-6 py-3 text-center">
-                <div class="text-gray-400 text-xs uppercase tracking-wide">Instances</div>
-                <div id="instance-count" class="text-2xl font-bold text-blue-400">-</div>
+<body class="min-h-screen px-4 py-6 text-white md:px-8">
+    <div class="mx-auto max-w-6xl">
+        <div class="mb-8 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+            <div>
+                <p class="text-xs uppercase tracking-[0.35em] text-sky-300/80">Live scaling telemetry</p>
+                <h1 class="mt-2 text-3xl font-semibold md:text-5xl">Scaling Engine Dashboard</h1>
+                <p class="mt-3 max-w-2xl text-sm text-slate-300 md:text-base">Connected to the deployed instances. The dashboard refreshes live status, CPU pressure, and request totals from the running microservices.</p>
             </div>
-            <div class="bg-gray-800 border border-gray-700 rounded-lg px-6 py-3 text-center">
-                <div class="text-gray-400 text-xs uppercase tracking-wide">Status</div>
-                <div class="text-2xl font-bold text-green-400 pulse">LIVE</div>
+            <div class="rounded-2xl border border-white/10 bg-slate-950/70 px-5 py-4 shadow-2xl shadow-sky-950/30 backdrop-blur">
+                <div class="text-xs uppercase tracking-[0.3em] text-slate-400">Clock</div>
+                <div id="clock" class="mt-1 font-mono text-lg text-sky-200"></div>
             </div>
         </div>
 
-        <!-- Instance Cards (auto-refresh via htmx) -->
-        <div id="status-grid" hx-get="/api/status" hx-trigger="every 5s" hx-swap="innerHTML">
-            <p class="text-gray-400 animate-pulse">Loading cluster state...</p>
+        <div class="mb-8 grid gap-4 md:grid-cols-4">
+            <div class="rounded-2xl border border-white/10 bg-slate-950/70 p-5 backdrop-blur">
+                <div class="text-xs uppercase tracking-[0.3em] text-slate-400">Instances</div>
+                <div id="instance-count" class="mt-2 text-3xl font-semibold text-white">-</div>
+            </div>
+            <div class="rounded-2xl border border-white/10 bg-slate-950/70 p-5 backdrop-blur">
+                <div class="text-xs uppercase tracking-[0.3em] text-slate-400">Healthy</div>
+                <div id="healthy-count" class="mt-2 text-3xl font-semibold text-emerald-300">-</div>
+            </div>
+            <div class="rounded-2xl border border-white/10 bg-slate-950/70 p-5 backdrop-blur">
+                <div class="text-xs uppercase tracking-[0.3em] text-slate-400">Average CPU</div>
+                <div id="average-cpu" class="mt-2 text-3xl font-semibold text-amber-300">-</div>
+            </div>
+            <div class="rounded-2xl border border-white/10 bg-slate-950/70 p-5 backdrop-blur">
+                <div class="text-xs uppercase tracking-[0.3em] text-slate-400">Request Rate</div>
+                <div id="request-rate" class="mt-2 text-3xl font-semibold text-cyan-300">-</div>
+            </div>
         </div>
 
-        <!-- System Config -->
-        <div class="mt-8 p-4 bg-gray-800 rounded-lg border border-gray-700">
-            <h2 class="text-xl font-semibold mb-2">System Config</h2>
-            <div class="grid grid-cols-3 gap-4 text-sm text-gray-300">
-                <div>Threshold Up: <span class="text-red-400">70%</span></div>
-                <div>Threshold Down: <span class="text-green-400">30%</span></div>
-                <div>Cooldown: <span class="text-yellow-400">3m</span></div>
+        <div id="status-message" class="mb-6 rounded-2xl border border-slate-700 bg-slate-950/60 px-4 py-3 text-sm text-slate-300">
+            Loading live instance data...
+        </div>
+
+        <div class="mb-8 grid gap-5 lg:grid-cols-2 xl:grid-cols-3" id="instance-grid"></div>
+
+        <div class="rounded-2xl border border-white/10 bg-slate-950/70 p-5 backdrop-blur">
+            <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <div>
+                    <h2 class="text-lg font-semibold text-white">System Config</h2>
+                    <p class="text-sm text-slate-400">Operational thresholds used by the scaler.</p>
+                </div>
+                <div class="grid gap-2 text-sm text-slate-200 sm:grid-cols-3">
+                    <div class="rounded-xl border border-white/10 bg-white/5 px-3 py-2">Threshold Up: <span class="text-rose-300">50%</span></div>
+                    <div class="rounded-xl border border-white/10 bg-white/5 px-3 py-2">Threshold Down: <span class="text-emerald-300">30%</span></div>
+                    <div class="rounded-xl border border-white/10 bg-white/5 px-3 py-2">Cooldown: <span class="text-amber-300">1m</span></div>
+                </div>
             </div>
         </div>
     </div>
 
     <script>
+        const instanceGrid = document.getElementById('instance-grid');
+        const statusMessage = document.getElementById('status-message');
+
         function updateClock() {
             document.getElementById('clock').textContent = new Date().toLocaleTimeString();
         }
-        function fetchSummary() {
-            fetch('/api/summary')
-                .then(r => r.json())
-                .then(data => {
-                    document.getElementById('instance-count').textContent = data.instance_count;
-                })
-                .catch(() => {});
+
+        function cpuClass(cpu) {
+            if (cpu > 70) return { badge: 'bg-rose-500/20 text-rose-200 border-rose-500/30', bar: 'bg-gradient-to-r from-rose-500 to-orange-500' };
+            if (cpu > 40) return { badge: 'bg-amber-500/20 text-amber-200 border-amber-500/30', bar: 'bg-gradient-to-r from-amber-400 to-yellow-500' };
+            return { badge: 'bg-emerald-500/20 text-emerald-200 border-emerald-500/30', bar: 'bg-gradient-to-r from-emerald-400 to-cyan-500' };
         }
+
+        function statusClass(status) {
+            if (status === 'STARTING') {
+                return 'border-sky-500/30 bg-sky-500/15 text-sky-200';
+            }
+            if (status === 'UNREACHABLE') {
+                return 'border-slate-600 bg-slate-700/30 text-slate-200';
+            }
+            if (status === 'HIGH LOAD') {
+                return 'border-rose-500/30 bg-rose-500/15 text-rose-200';
+            }
+            if (status === 'ELEVATED') {
+                return 'border-amber-500/30 bg-amber-500/15 text-amber-200';
+            }
+            return 'border-emerald-500/30 bg-emerald-500/15 text-emerald-200';
+        }
+
+        function renderInstances(instances) {
+            if (!instances.length) {
+                instanceGrid.innerHTML = '<div class="rounded-2xl border border-white/10 bg-slate-950/60 p-6 text-slate-300">No instances found in the current Terraform output.</div>';
+                return;
+            }
+
+            instanceGrid.innerHTML = instances.map((instance) => {
+                const isStarting = instance.status === 'STARTING';
+                const colors = cpuClass(instance.cpu_percent || 0);
+                const width = Math.min(Math.max(instance.cpu_percent || 0, 0), 100);
+                const requestRate = Number.isFinite(instance.request_rate) ? instance.request_rate.toFixed(2) : '0.00';
+                const requestWidth = Math.min(Math.max((instance.request_rate || 0) * 5, 0), 100);
+                const healthLabel = isStarting ? 'Instance starting' : (instance.healthy ? 'Healthy' : 'Attention required');
+                const buttonLabel = isStarting ? 'Instance is starting...' : 'Increase CPU Load';
+                const requestButtonLabel = isStarting ? 'Instance is starting...' : 'Increase Request Rate';
+                const rolePillClass = instance.role === 'LB-SENDER'
+                    ? 'border-fuchsia-500/30 bg-fuchsia-500/15 text-fuchsia-100'
+                    : 'border-cyan-500/30 bg-cyan-500/15 text-cyan-100';
+
+                return `
+                    <article class="fade-in rounded-2xl border border-white/10 bg-slate-950/70 p-5 shadow-xl shadow-slate-950/40 backdrop-blur">
+                        <div class="mb-4 flex items-start justify-between gap-3">
+                            <div>
+                                <div class="text-xs uppercase tracking-[0.3em] text-slate-400">Instance</div>
+                                <div class="mt-1 font-mono text-lg text-sky-200">${instance.ip}</div>
+                                <div class="mt-2 inline-flex rounded-full border px-2 py-1 text-[10px] font-semibold tracking-[0.2em] ${rolePillClass}">${instance.role || 'APP'}</div>
+                            </div>
+                            <span class="rounded-full border px-3 py-1 text-xs font-semibold ${statusClass(instance.status)}">${instance.status}</span>
+                        </div>
+
+                        <div class="space-y-4">
+                            <div>
+                                <div class="mb-2 flex items-center justify-between text-sm">
+                                    <span class="text-slate-400">CPU Load</span>
+                                    <span class="font-mono text-slate-100">${width.toFixed(1)}%</span>
+                                </div>
+                                <div class="h-2 overflow-hidden rounded-full bg-white/10">
+                                    <div class="h-full rounded-full ${colors.bar}" style="width: ${width}%"></div>
+                                </div>
+                            </div>
+
+                            <div>
+                                <div class="mb-2 flex items-center justify-between text-sm">
+                                    <span class="text-slate-400">Request Rate</span>
+                                    <span class="font-mono text-slate-100">${requestRate} req/s</span>
+                                </div>
+                                <div class="h-2 overflow-hidden rounded-full bg-white/10">
+                                    <div class="h-full rounded-full bg-gradient-to-r from-cyan-500 to-blue-500" style="width: ${requestWidth}%"></div>
+                                </div>
+                            </div>
+
+                            <div class="flex items-center justify-between rounded-xl border px-3 py-2 text-sm ${colors.badge}">
+                                <span>Health</span>
+                                <span class="font-semibold">${healthLabel}</span>
+                            </div>
+
+                            <button
+                                class="w-full rounded-xl border border-sky-400/30 bg-sky-500/15 px-3 py-2 text-sm font-semibold text-sky-100 transition hover:bg-sky-500/25 disabled:cursor-not-allowed disabled:opacity-50"
+                                ${(instance.healthy && instance.role !== 'LB-SENDER') ? '' : 'disabled'}
+                                onclick="triggerLoad('${instance.ip}')"
+                            >
+                                ${buttonLabel}
+                            </button>
+
+                            <button
+                                class="w-full rounded-xl border border-cyan-400/30 bg-cyan-500/15 px-3 py-2 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-500/25 disabled:cursor-not-allowed disabled:opacity-50"
+                                ${(instance.healthy && instance.role !== 'LB-SENDER') ? '' : 'disabled'}
+                                onclick="triggerRequestLoad('${instance.ip}')"
+                            >
+                                ${requestButtonLabel}
+                            </button>
+
+                            ${instance.error ? `<div class="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">${instance.error}</div>` : ''}
+                        </div>
+                    </article>`;
+            }).join('');
+        }
+
+        async function triggerLoad(ip) {
+            try {
+                const response = await fetch(`/api/load?ip=${encodeURIComponent(ip)}`, {
+                    method: 'POST'
+                });
+
+                if (!response.ok) {
+                    const message = await response.text();
+                    throw new Error(message || 'Failed to trigger load');
+                }
+
+                const result = await response.json();
+                statusMessage.textContent = `Load burst sent to ${result.ip} (${result.requests} /work requests).`;
+                statusMessage.className = 'mb-6 rounded-2xl border border-sky-500/30 bg-sky-500/10 px-4 py-3 text-sm text-sky-100';
+                setTimeout(refreshDashboard, 1200);
+            } catch (error) {
+                statusMessage.textContent = `Load trigger failed: ${error.message}`;
+                statusMessage.className = 'mb-6 rounded-2xl border border-rose-500/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-100';
+            }
+        }
+
+        async function triggerRequestLoad(ip) {
+            try {
+                const response = await fetch(`/api/request-load?ip=${encodeURIComponent(ip)}`, {
+                    method: 'POST'
+                });
+
+                if (!response.ok) {
+                    const message = await response.text();
+                    throw new Error(message || 'Failed to trigger request load');
+                }
+
+                const result = await response.json();
+                statusMessage.textContent = `Request load increased on ${result.ip}: +${result.added_rps} req/s (current target: ${result.current_rps} req/s).`;
+                statusMessage.className = 'mb-6 rounded-2xl border border-cyan-500/30 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-100';
+                setTimeout(refreshDashboard, 1200);
+            } catch (error) {
+                statusMessage.textContent = `Request burst failed: ${error.message}`;
+                statusMessage.className = 'mb-6 rounded-2xl border border-rose-500/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-100';
+            }
+        }
+
+        async function refreshDashboard() {
+            try {
+                const [statusResponse, summaryResponse] = await Promise.all([
+                    fetch('/api/status', { cache: 'no-store' }),
+                    fetch('/api/summary', { cache: 'no-store' })
+                ]);
+
+                if (!statusResponse.ok || !summaryResponse.ok) {
+                    throw new Error('Dashboard API returned a non-OK response');
+                }
+
+                const statusData = await statusResponse.json();
+                const summaryData = await summaryResponse.json();
+
+                renderInstances(statusData.instances || []);
+                document.getElementById('instance-count').textContent = summaryData.instance_count ?? 0;
+                document.getElementById('healthy-count').textContent = summaryData.healthy_count ?? 0;
+                document.getElementById('average-cpu').textContent = `${Number(summaryData.average_cpu || 0).toFixed(1)}%`;
+                document.getElementById('request-rate').textContent = `${Number(summaryData.request_rate || 0).toFixed(2)} req/s`;
+                statusMessage.textContent = `Live data refreshed at ${new Date().toLocaleTimeString()}`;
+                statusMessage.className = 'mb-6 rounded-2xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100';
+            } catch (error) {
+                statusMessage.textContent = `Unable to load live data: ${error.message}`;
+                statusMessage.className = 'mb-6 rounded-2xl border border-rose-500/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-100';
+                instanceGrid.innerHTML = '<div class="rounded-2xl border border-rose-500/20 bg-rose-500/10 p-6 text-rose-100">The dashboard could not reach the live API.</div>';
+            }
+        }
+
         updateClock();
-        fetchSummary();
+        refreshDashboard();
         setInterval(updateClock, 1000);
-        setInterval(fetchSummary, 5000);
+        setInterval(refreshDashboard, 5000);
     </script>
 </body>
 </html>
