@@ -57,6 +57,16 @@
             </div>
         </div>
 
+        <div class="mb-8 rounded-2xl border border-fuchsia-500/30 bg-fuchsia-500/10 p-5 backdrop-blur">
+            <div class="flex items-center gap-3">
+                <div class="h-3 w-3 rounded-full bg-fuchsia-500 animate-pulse"></div>
+                <div>
+                    <h3 class="text-lg font-semibold text-fuchsia-200">Load Balancer Active</h3>
+                    <p class="text-sm text-fuchsia-300/80">All traffic is being routed through the load balancer. Failed instances are automatically replaced.</p>
+                </div>
+            </div>
+        </div>
+
         <div id="status-message" class="mb-6 rounded-2xl border border-slate-700 bg-slate-950/60 px-4 py-3 text-sm text-slate-300">
             Loading live instance data...
         </div>
@@ -74,6 +84,46 @@
                     <div class="rounded-xl border border-white/10 bg-white/5 px-3 py-2">Threshold Down: <span class="text-emerald-300">30%</span></div>
                     <div class="rounded-xl border border-white/10 bg-white/5 px-3 py-2">Cooldown: <span class="text-amber-300">1m</span></div>
                 </div>
+            </div>
+        </div>
+
+        <div class="rounded-2xl border border-white/10 bg-slate-950/70 p-5 backdrop-blur">
+            <div class="flex flex-col gap-3">
+                <div>
+                    <h2 class="text-lg font-semibold text-white">Test Controls</h2>
+                    <p class="text-sm text-slate-400">Manually trigger stress tests to validate scaling behavior.</p>
+                </div>
+                <div class="grid gap-3 md:grid-cols-2">
+                    <button
+                        class="rounded-xl border border-amber-400/30 bg-amber-500/15 px-4 py-3 text-sm font-semibold text-amber-100 transition hover:bg-amber-500/25 active:bg-amber-500/35"
+                        onclick="triggerCPULoadTest()"
+                    >
+                        ▶ Start CPU Load Test
+                    </button>
+                    <button
+                        class="rounded-xl border border-cyan-400/30 bg-cyan-500/15 px-4 py-3 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-500/25 active:bg-cyan-500/35"
+                        onclick="triggerTrafficSpikeTest()"
+                    >
+                        ▶ Start Traffic Spike Test
+                    </button>
+                </div>
+                <div id="test-status" class="text-xs text-slate-400">Tests will run in the background. Check console for detailed progress.</div>
+            </div>
+        </div>
+
+        <div class="rounded-2xl border border-rose-500/30 bg-rose-500/10 p-5 backdrop-blur">
+            <div class="flex flex-col gap-3">
+                <div>
+                    <h2 class="text-lg font-semibold text-rose-200">Graceful Shutdown</h2>
+                    <p class="text-sm text-rose-300/80">Destroy all provisioned instances and cleanup infrastructure.</p>
+                </div>
+                <button
+                    class="w-full rounded-xl border border-rose-400/30 bg-rose-500/15 px-4 py-3 text-sm font-semibold text-rose-100 transition hover:bg-rose-500/25 active:bg-rose-500/35"
+                    onclick="triggerGracefulShutdown()"
+                >
+                    🛑 Graceful Shutdown (Destroy All)
+                </button>
+                <div id="shutdown-status" class="text-xs text-rose-300/60"></div>
             </div>
         </div>
     </div>
@@ -108,6 +158,22 @@
             return 'border-emerald-500/30 bg-emerald-500/15 text-emerald-200';
         }
 
+        function formatUptime(seconds) {
+            if (seconds < 0) seconds = 0;
+            const days = Math.floor(seconds / 86400);
+            const hours = Math.floor((seconds % 86400) / 3600);
+            const minutes = Math.floor((seconds % 3600) / 60);
+            const secs = Math.floor(seconds % 60);
+
+            const parts = [];
+            if (days > 0) parts.push(`${days}d`);
+            if (hours > 0) parts.push(`${hours}h`);
+            if (minutes > 0) parts.push(`${minutes}m`);
+            if (secs > 0 || parts.length === 0) parts.push(`${secs}s`);
+
+            return parts.slice(0, 2).join(' ');
+        }
+
         function renderInstances(instances) {
             if (!instances.length) {
                 instanceGrid.innerHTML = '<div class="rounded-2xl border border-white/10 bg-slate-950/60 p-6 text-slate-300">No instances found in the current Terraform output.</div>';
@@ -123,6 +189,7 @@
                 const healthLabel = isStarting ? 'Instance starting' : (instance.healthy ? 'Healthy' : 'Attention required');
                 const buttonLabel = isStarting ? 'Instance is starting...' : 'Increase CPU Load';
                 const requestButtonLabel = isStarting ? 'Instance is starting...' : 'Increase Request Rate';
+                const failHealthButtonLabel = isStarting ? 'Instance is starting...' : 'Fail Health Check (2m)';
                 const rolePillClass = instance.role === 'LB-SENDER'
                     ? 'border-fuchsia-500/30 bg-fuchsia-500/15 text-fuchsia-100'
                     : 'border-cyan-500/30 bg-cyan-500/15 text-cyan-100';
@@ -139,6 +206,13 @@
                         </div>
 
                         <div class="space-y-4">
+                            <div>
+                                <div class="mb-2 flex items-center justify-between text-sm">
+                                    <span class="text-slate-400">Uptime</span>
+                                    <span class="font-mono text-slate-100">${formatUptime(instance.uptime_seconds || 0)}</span>
+                                </div>
+                            </div>
+
                             <div>
                                 <div class="mb-2 flex items-center justify-between text-sm">
                                     <span class="text-slate-400">CPU Load</span>
@@ -180,7 +254,15 @@
                                 ${requestButtonLabel}
                             </button>
 
-                            ${instance.error ? `<div class="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">${instance.error}</div>` : ''}
+                            <button
+                                class="w-full rounded-xl border border-rose-400/30 bg-rose-500/15 px-3 py-2 text-sm font-semibold text-rose-100 transition hover:bg-rose-500/25 disabled:cursor-not-allowed disabled:opacity-50"
+                                ${(instance.role !== 'LB-SENDER') ? '' : 'disabled'}
+                                onclick="triggerHealthFail('${instance.ip}')"
+                            >
+                                ${failHealthButtonLabel}
+                            </button>
+
+                            ${instance.status === 'STARTING' ? `<div class="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200">It's being set up</div>` : (instance.error ? `<div class="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">${instance.error}</div>` : '')}
                         </div>
                     </article>`;
             }).join('');
@@ -228,6 +310,27 @@
             }
         }
 
+        async function triggerHealthFail(ip) {
+            try {
+                const response = await fetch(`/api/fail-health?ip=${encodeURIComponent(ip)}&seconds=120`, {
+                    method: 'POST'
+                });
+
+                if (!response.ok) {
+                    const message = await response.text();
+                    throw new Error(message || 'Failed to inject health failure');
+                }
+
+                const result = await response.json();
+                statusMessage.textContent = `Health failure injected on ${result.ip} for ${result.seconds}s.`;
+                statusMessage.className = 'mb-6 rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-100';
+                setTimeout(refreshDashboard, 1200);
+            } catch (error) {
+                statusMessage.textContent = `Health failure trigger failed: ${error.message}`;
+                statusMessage.className = 'mb-6 rounded-2xl border border-rose-500/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-100';
+            }
+        }
+
         async function refreshDashboard() {
             try {
                 const [statusResponse, summaryResponse] = await Promise.all([
@@ -255,6 +358,106 @@
                 instanceGrid.innerHTML = '<div class="rounded-2xl border border-rose-500/20 bg-rose-500/10 p-6 text-rose-100">The dashboard could not reach the live API.</div>';
             }
         }
+
+        async function triggerCPULoadTest() {
+            try {
+                const response = await fetch('/api/test/cpu-load', {
+                    method: 'POST'
+                });
+
+                if (!response.ok) {
+                    const message = await response.text();
+                    throw new Error(message || 'Failed to start CPU Load Test');
+                }
+
+                const result = await response.json();
+                statusMessage.textContent = `✓ ${result.message}`;
+                statusMessage.className = 'mb-6 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100';
+                document.getElementById('test-status').textContent = `Last test: CPU Load Test started at ${new Date().toLocaleTimeString()}`;
+            } catch (error) {
+                statusMessage.textContent = `Failed to start CPU Load Test: ${error.message}`;
+                statusMessage.className = 'mb-6 rounded-2xl border border-rose-500/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-100';
+            }
+        }
+
+        async function triggerTrafficSpikeTest() {
+            try {
+                const response = await fetch('/api/test/traffic-spike', {
+                    method: 'POST'
+                });
+
+                if (!response.ok) {
+                    const message = await response.text();
+                    throw new Error(message || 'Failed to start Traffic Spike Test');
+                }
+
+                const result = await response.json();
+                statusMessage.textContent = `✓ ${result.message}`;
+                statusMessage.className = 'mb-6 rounded-2xl border border-cyan-500/30 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-100';
+                document.getElementById('test-status').textContent = `Last test: Traffic Spike Test started at ${new Date().toLocaleTimeString()}`;
+            } catch (error) {
+                statusMessage.textContent = `Failed to start Traffic Spike Test: ${error.message}`;
+                statusMessage.className = 'mb-6 rounded-2xl border border-rose-500/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-100';
+            }
+        }
+
+        async function triggerGracefulShutdown() {
+            const confirmed = confirm('⚠️ WARNING: This will destroy ALL provisioned instances and infrastructure. This action cannot be undone. Are you sure?');
+            if (!confirmed) {
+                return;
+            }
+
+            const shutdownStatus = document.getElementById('shutdown-status');
+            shutdownStatus.textContent = 'Initiating shutdown...';
+
+            try {
+                const response = await fetch('/api/shutdown', {
+                    method: 'POST'
+                });
+
+                if (!response.ok) {
+                    const message = await response.text();
+                    throw new Error(message || 'Failed to initiate shutdown');
+                }
+
+                const result = await response.json();
+                statusMessage.textContent = `⏳ ${result.message} Instances are being destroyed. This may take a few moments...`;
+                statusMessage.className = 'mb-6 rounded-2xl border border-rose-500/40 bg-rose-500/15 px-4 py-3 text-sm text-rose-100';
+                shutdownStatus.textContent = 'Terraform destroy in progress...';
+
+                // Poll for completion (check if instances are gone)
+                let attempts = 0;
+                const pollInterval = setInterval(async () => {
+                    attempts++;
+                    try {
+                        const statusResp = await fetch('/api/status', { cache: 'no-store' });
+                        if (statusResp.ok) {
+                            const statusData = await statusResp.json();
+                            if (!statusData.instances || statusData.instances.length === 0) {
+                                clearInterval(pollInterval);
+                                statusMessage.textContent = '✓ Graceful shutdown complete! All provisioned instances have been deleted. Infrastructure cleanup successful.';
+                                statusMessage.className = 'mb-6 rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100';
+                                shutdownStatus.textContent = 'All instances destroyed. You can close this window.';
+                            }
+                        }
+                    } catch (e) {
+                        // Ignore status check errors during shutdown
+                    }
+
+                    // Stop polling after 5 minutes
+                    if (attempts > 150) {
+                        clearInterval(pollInterval);
+                        statusMessage.textContent = '⏱️ Shutdown timeout. Resources may still be cleaning up. Check AWS console for status.';
+                        statusMessage.className = 'mb-6 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100';
+                    }
+                }, 2000);
+            } catch (error) {
+                statusMessage.textContent = `Failed to initiate shutdown: ${error.message}`;
+                statusMessage.className = 'mb-6 rounded-2xl border border-rose-500/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-100';
+                shutdownStatus.textContent = 'Shutdown failed.';
+            }
+        }
+
 
         updateClock();
         refreshDashboard();

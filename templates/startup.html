@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>APS Startup Configuration</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        :root {
+            color-scheme: dark;
+        }
+
+        body {
+            background:
+                radial-gradient(circle at top left, rgba(59, 130, 246, 0.22), transparent 30%),
+                radial-gradient(circle at top right, rgba(16, 185, 129, 0.16), transparent 24%),
+                linear-gradient(180deg, #030712 0%, #0f172a 55%, #020617 100%);
+        }
+
+        .fade-in { animation: fade-in .35s ease-out both; }
+        @keyframes fade-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+        .toggle-switch {
+            position: relative;
+            display: inline-block;
+            width: 50px;
+            height: 28px;
+        }
+
+        .toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #374151;
+            transition: .4s;
+            border-radius: 28px;
+        }
+
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 22px;
+            width: 22px;
+            left: 3px;
+            bottom: 3px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+
+        input:checked + .slider {
+            background-color: #3b82f6;
+        }
+
+        input:checked + .slider:before {
+            transform: translateX(22px);
+        }
+
+        input:disabled + .slider {
+            cursor: not-allowed;
+            opacity: 0.7;
+        }
+
+        .config-card {
+            animation: fade-in 0.5s ease-out both;
+        }
+    </style>
+</head>
+<body class="min-h-screen px-4 py-6 text-white md:px-8">
+    <div class="mx-auto max-w-4xl">
+        <!-- Header -->
+        <div class="mb-8">
+            <p class="text-xs uppercase tracking-[0.35em] text-sky-300/80">System Initialization</p>
+            <h1 class="mt-2 text-3xl font-semibold md:text-5xl">Startup Configuration</h1>
+            <p class="mt-3 max-w-2xl text-sm text-slate-300 md:text-base">Configure your auto-scaling system before launching the dashboard.</p>
+        </div>
+
+        <form id="config-form" class="space-y-6">
+            <!-- AWS Configuration Section -->
+            <div class="config-card rounded-2xl border border-white/10 bg-slate-950/70 p-6 backdrop-blur">
+                <h2 class="mb-4 text-xl font-semibold text-sky-200">AWS Configuration</h2>
+                
+                <div class="mb-4">
+                    <label class="block text-sm font-medium text-slate-300 mb-2">AWS Region</label>
+                    <select id="aws-region" class="w-full rounded-lg border border-slate-600 bg-slate-900 px-4 py-2 text-white focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500/50">
+                        <option value="us-east-1" selected>us-east-1 (N. Virginia)</option>
+                        <option value="us-west-2">us-west-2 (Oregon)</option>
+                        <option value="eu-west-1">eu-west-1 (Ireland)</option>
+                        <option value="eu-central-1">eu-central-1 (Frankfurt)</option>
+                        <option value="ap-southeast-1">ap-southeast-1 (Singapore)</option>
+                    </select>
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-slate-300 mb-2">AWS Profile</label>
+                    <input type="text" id="aws-profile" value="default" class="w-full rounded-lg border border-slate-600 bg-slate-900 px-4 py-2 text-white placeholder-slate-500 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500/50" placeholder="default">
+                </div>
+            </div>
+
+            <!-- Scaling Configuration Section -->
+            <div class="config-card rounded-2xl border border-white/10 bg-slate-950/70 p-6 backdrop-blur">
+                <h2 class="mb-4 text-xl font-semibold text-emerald-200">Scaling Configuration</h2>
+                
+                <div class="grid gap-4 md:grid-cols-2">
+                    <div>
+                        <label class="block text-sm font-medium text-slate-300 mb-2">Min Instances</label>
+                        <input type="number" id="min-instances" value="1" min="1" max="10" class="w-full rounded-lg border border-slate-600 bg-slate-900 px-4 py-2 text-white focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500/50">
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-medium text-slate-300 mb-2">Max Instances</label>
+                        <input type="number" id="max-instances" value="3" min="1" max="20" class="w-full rounded-lg border border-slate-600 bg-slate-900 px-4 py-2 text-white focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500/50">
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-medium text-slate-300 mb-2">Initial Instances</label>
+                        <input type="number" id="initial-instances" value="1" min="1" max="10" class="w-full rounded-lg border border-slate-600 bg-slate-900 px-4 py-2 text-white focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500/50">
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-medium text-slate-300 mb-2">Cooldown Period (seconds)</label>
+                        <input type="number" id="cooldown" value="60" min="10" max="600" class="w-full rounded-lg border border-slate-600 bg-slate-900 px-4 py-2 text-white focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500/50">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Threshold Configuration Section -->
+            <div class="config-card rounded-2xl border border-white/10 bg-slate-950/70 p-6 backdrop-blur">
+                <h2 class="mb-4 text-xl font-semibold text-amber-200">Scaling Thresholds</h2>
+                
+                <div class="grid gap-4 md:grid-cols-2">
+                    <div>
+                        <label class="block text-sm font-medium text-slate-300 mb-2">CPU Scale-Up Threshold (%)</label>
+                        <input type="number" id="cpu-threshold-up" value="50" min="1" max="99" class="w-full rounded-lg border border-slate-600 bg-slate-900 px-4 py-2 text-white focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500/50">
+                        <p class="mt-1 text-xs text-slate-400">Scale up when CPU exceeds this percentage</p>
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-medium text-slate-300 mb-2">CPU Scale-Down Threshold (%)</label>
+                        <input type="number" id="cpu-threshold-down" value="30" min="1" max="99" class="w-full rounded-lg border border-slate-600 bg-slate-900 px-4 py-2 text-white focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500/50">
+                        <p class="mt-1 text-xs text-slate-400">Scale down when CPU drops below this percentage</p>
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-medium text-slate-300 mb-2">Request Rate Scale-Up (req/s)</label>
+                        <input type="number" id="req-threshold-up" value="20" min="1" max="1000" class="w-full rounded-lg border border-slate-600 bg-slate-900 px-4 py-2 text-white focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500/50">
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-medium text-slate-300 mb-2">Request Rate Scale-Down (req/s)</label>
+                        <input type="number" id="req-threshold-down" value="5" min="1" max="1000" class="w-full rounded-lg border border-slate-600 bg-slate-900 px-4 py-2 text-white focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500/50">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Monitoring & Health Section -->
+            <div class="config-card rounded-2xl border border-white/10 bg-slate-950/70 p-6 backdrop-blur">
+                <h2 class="mb-4 text-xl font-semibold text-cyan-200">Monitoring & Health</h2>
+                
+                <div class="grid gap-4 md:grid-cols-2">
+                    <div>
+                        <label class="block text-sm font-medium text-slate-300 mb-2">Health Check Interval (seconds)</label>
+                        <input type="number" id="health-check-interval" value="10" min="5" max="60" class="w-full rounded-lg border border-slate-600 bg-slate-900 px-4 py-2 text-white focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500/50">
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-medium text-slate-300 mb-2">Monitoring Interval (seconds)</label>
+                        <input type="number" id="monitoring-interval" value="30" min="10" max="120" class="w-full rounded-lg border border-slate-600 bg-slate-900 px-4 py-2 text-white focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500/50">
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-medium text-slate-300 mb-2">Health Check Retries</label>
+                        <input type="number" id="health-check-retries" value="2" min="1" max="5" class="w-full rounded-lg border border-slate-600 bg-slate-900 px-4 py-2 text-white focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500/50">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Feature Toggles Section -->
+            <div class="config-card rounded-2xl border border-white/10 bg-slate-950/70 p-6 backdrop-blur">
+                <h2 class="mb-4 text-xl font-semibold text-fuchsia-200">Feature Toggles</h2>
+                
+                <div class="mb-4 rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-sm text-sky-200">
+                    <strong>Traffic Isolation Enforced:</strong> All traffic routes through the load balancer only. App instances are network-isolated (no direct external access). Scaling is CPU-based only.
+                </div>
+                
+                <div class="space-y-3">
+                    <label class="flex items-center gap-4 cursor-pointer">
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="cpu-monitoring" checked>
+                            <span class="slider"></span>
+                        </label>
+                        <div>
+                            <span class="text-slate-300">CPU Monitoring</span>
+                            <p class="text-xs text-slate-400">Primary scaling driver for app instances</p>
+                        </div>
+                    </label>
+
+                    <label class="flex items-center gap-4 cursor-pointer">
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="request-monitoring" disabled>
+                            <span class="slider"></span>
+                        </label>
+                        <div>
+                            <span class="text-slate-400">Request Rate Monitoring</span>
+                            <p class="text-xs text-slate-500">Disabled - traffic isolation enforced (LB-only)</p>
+                        </div>
+                    </label>
+
+                    <label class="flex items-center gap-4 cursor-pointer">
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="auto-replace-unhealthy" checked>
+                            <span class="slider"></span>
+                        </label>
+                        <span class="text-slate-300">Auto-Replace Unhealthy Instances</span>
+                    </label>
+
+                    <label class="flex items-center gap-4 cursor-pointer">
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="immediate-scaling" checked>
+                            <span class="slider"></span>
+                        </label>
+                        <span class="text-slate-300">Immediate Scaling</span>
+                    </label>
+
+                    <label class="flex items-center gap-4 cursor-not-allowed opacity-75">
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="encrypted-state" checked disabled>
+                            <span class="slider"></span>
+                        </label>
+                        <div>
+                            <span class="text-slate-300">Encrypted State Storage</span>
+                            <p class="text-xs text-emerald-400">Enabled by default (locked)</p>
+                        </div>
+                    </label>
+                </div>
+            </div>
+
+            <!-- Action Buttons -->
+            <div class="flex gap-3">
+                <button
+                    type="button"
+                    onclick="resetConfiguration()"
+                    class="rounded-lg border border-slate-600 bg-slate-900 px-6 py-3 font-semibold text-slate-300 transition hover:bg-slate-800 active:bg-slate-700"
+                >
+                    Reset to Defaults
+                </button>
+                <button
+                    type="button"
+                    onclick="launchDashboard()"
+                    class="flex-1 rounded-lg border border-sky-500/50 bg-sky-500/20 px-6 py-3 font-semibold text-sky-100 transition hover:bg-sky-500/30 active:bg-sky-500/40"
+                >
+                    Launch Dashboard
+                </button>
+            </div>
+
+            <!-- Status Message -->
+            <div id="status-message" class="rounded-lg border border-slate-700 bg-slate-950/60 px-4 py-3 text-sm text-slate-300 hidden">
+                Configuration saved. Starting system...
+            </div>
+        </form>
+    </div>
+
+    <script>
+        // Load saved configuration on page load
+        function loadConfiguration() {
+            const saved = localStorage.getItem('apsConfig');
+            if (saved) {
+                const config = JSON.parse(saved);
+                Object.keys(config).forEach(key => {
+                    const element = document.getElementById(key);
+                    if (element) {
+                        if (element.type === 'checkbox') {
+                            element.checked = config[key];
+                        } else {
+                            element.value = config[key];
+                        }
+                    }
+                });
+            }
+        }
+
+        // Save configuration to localStorage
+        function saveConfiguration() {
+            const form = document.getElementById('config-form');
+            const config = {};
+            
+            const inputs = form.querySelectorAll('input, select');
+            inputs.forEach(input => {
+                if (input.type === 'checkbox') {
+                    config[input.id] = input.checked;
+                } else {
+                    config[input.id] = isNaN(input.value) ? input.value : parseFloat(input.value);
+                }
+            });
+
+            localStorage.setItem('apsConfig', JSON.stringify(config));
+            return config;
+        }
+
+        // Reset to default configuration
+        function resetConfiguration() {
+            localStorage.removeItem('apsConfig');
+            location.reload();
+        }
+
+        // Validate configuration
+        function validateConfiguration() {
+            const minInstances = parseInt(document.getElementById('min-instances').value);
+            const maxInstances = parseInt(document.getElementById('max-instances').value);
+            const initialInstances = parseInt(document.getElementById('initial-instances').value);
+
+            if (minInstances > maxInstances) {
+                alert('Min instances cannot be greater than max instances');
+                return false;
+            }
+
+            if (initialInstances < minInstances || initialInstances > maxInstances) {
+                alert('Initial instances must be between min and max instances');
+                return false;
+            }
+
+            const cpuUp = parseInt(document.getElementById('cpu-threshold-up').value);
+            const cpuDown = parseInt(document.getElementById('cpu-threshold-down').value);
+
+            if (cpuDown >= cpuUp) {
+                alert('CPU scale-down threshold must be lower than scale-up threshold');
+                return false;
+            }
+
+            return true;
+        }
+
+        // Launch the dashboard
+        function launchDashboard() {
+            if (!validateConfiguration()) {
+                return;
+            }
+
+            saveConfiguration();
+            
+            const statusMsg = document.getElementById('status-message');
+            statusMsg.classList.remove('hidden');
+            statusMsg.textContent = 'Configuration saved. Starting system...';
+
+            // Simulate system startup delay
+            setTimeout(() => {
+                // Send configuration to backend/save to environment
+                console.log('Configuration:', localStorage.getItem('apsConfig'));
+                
+                // Redirect to main dashboard
+                window.location.href = '/';
+            }, 1500);
+        }
+
+        // Initialize on page load
+        window.addEventListener('DOMContentLoaded', loadConfiguration);
+    </script>
+</body>
+</html>

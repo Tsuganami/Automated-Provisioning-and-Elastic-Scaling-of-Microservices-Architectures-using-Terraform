@@ -20,6 +20,8 @@ locals {
 
                             var requestCounter = 0
                             var counterMutex = &sync.Mutex{}
+                            var healthStateMutex = &sync.Mutex{}
+                            var healthFailUntil time.Time
 
                             func incrementRequestCounter() {
                                     counterMutex.Lock()
@@ -73,9 +75,43 @@ locals {
                             }
 
                             func healthHandler(w http.ResponseWriter, r *http.Request) {
+                                    healthStateMutex.Lock()
+                                    failUntil := healthFailUntil
+                                    healthStateMutex.Unlock()
+
                                     w.Header().Set("Content-Type", "application/json")
+                                    if time.Now().Before(failUntil) {
+                                            w.WriteHeader(http.StatusServiceUnavailable)
+                                            fmt.Fprintf(w, "{\"status\":\"unhealthy\",\"reason\":\"manual_fail_injected\",\"failed_until\":\"%s\",\"hostname\":\"%s\"}", failUntil.Format(time.RFC3339), os.Getenv("HOSTNAME"))
+                                            return
+                                    }
+
                                     w.WriteHeader(http.StatusOK)
                                     fmt.Fprintf(w, "{\"status\":\"healthy\",\"hostname\":\"%s\"}", os.Getenv("HOSTNAME"))
+                            }
+
+                            func failHealthHandler(w http.ResponseWriter, r *http.Request) {
+                                    if r.Method != http.MethodPost {
+                                            w.WriteHeader(http.StatusMethodNotAllowed)
+                                            return
+                                    }
+
+                                    seconds := 120
+                                    if value := strings.TrimSpace(r.URL.Query().Get("seconds")); value != "" {
+                                            parsed, err := strconv.Atoi(value)
+                                            if err == nil && parsed > 0 && parsed <= 900 {
+                                                    seconds = parsed
+                                            }
+                                    }
+
+                                    failedUntil := time.Now().Add(time.Duration(seconds) * time.Second)
+                                    healthStateMutex.Lock()
+                                    healthFailUntil = failedUntil
+                                    healthStateMutex.Unlock()
+
+                                    w.Header().Set("Content-Type", "application/json")
+                                    w.WriteHeader(http.StatusAccepted)
+                                    fmt.Fprintf(w, "{\"status\":\"failure_injected\",\"seconds\":%d,\"failed_until\":\"%s\",\"hostname\":\"%s\"}", seconds, failedUntil.Format(time.RFC3339), os.Getenv("HOSTNAME"))
                             }
 
                             func main() {
@@ -83,6 +119,7 @@ locals {
                                     http.HandleFunc("/request", requestHandler)
                                     http.HandleFunc("/metrics", metricsHandler)
                                     http.HandleFunc("/health", healthHandler)
+                                    http.HandleFunc("/fail-health", failHealthHandler)
                                     http.ListenAndServe(":8080", nil)
                             }
                             GOEOF
@@ -146,7 +183,7 @@ resource "aws_instance" "lb_sender" {
     ami           = "ami-0c7217cdde317cfec"
     instance_type = "t3.micro"
 
-    vpc_security_group_ids = [aws_security_group.aps_sg.id]
+    vpc_security_group_ids = [aws_security_group.lb_sg.id]
         user_data              = local.lb_user_data
         user_data_replace_on_change = true
 
@@ -164,7 +201,7 @@ resource "aws_instance" "app_server" {
     ami           = "ami-0c7217cdde317cfec"
     instance_type = "t3.micro"
 
-    vpc_security_group_ids = [aws_security_group.aps_sg.id]
+    vpc_security_group_ids = [aws_security_group.app_sg.id]
     user_data              = local.app_user_data
 
     tags = {
