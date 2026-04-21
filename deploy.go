@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -16,7 +17,9 @@ import (
 	"time"
 )
 
-const instanceStartupGracePeriod = 4 * time.Minute
+const InstanceStartupGracePeriod = 4 * time.Minute
+
+var autoYes bool
 
 func openBrowser(url string) {
 	var cmd *exec.Cmd
@@ -159,6 +162,7 @@ type instanceStatus struct {
 	RequestRate  float64 `json:"request_rate"`
 	Status       string  `json:"status"`
 	Healthy      bool    `json:"healthy"`
+	UptimeSeconds int64  `json:"uptime_seconds"`
 	Error        string  `json:"error,omitempty"`
 }
 
@@ -171,7 +175,7 @@ func isKnownInstance(ip string, ips *[]string) bool {
 	return false
 }
 
-func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string) {
+func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string, scalingConfig ScalingConfig) {
 	instanceSeenAt := make(map[string]time.Time)
 	var instanceSeenMu sync.Mutex
 	var requestRateMu sync.Mutex
@@ -185,8 +189,33 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string) {
 		instanceSeenAt[ip] = time.Now()
 	}
 
-	// Keep sending configured synthetic request load continuously (req/s per app instance).
+	// Continuous background traffic through the load balancer (entry point for all traffic)
+	// Wait 5 minutes before starting to allow instances to fully boot
 	go func() {
+		time.Sleep(5 * time.Minute)
+		
+		client := &http.Client{Timeout: 5 * time.Second}
+		ticker := time.NewTicker(100 * time.Millisecond) // 10 req/s baseline
+		defer ticker.Stop()
+		for range ticker.C {
+			if *lbIP == "" {
+				continue
+			}
+			go func(lbIP string) {
+				_, err := client.Get(fmt.Sprintf("http://%s/request", lbIP))
+				if err != nil {
+					// Silently ignore errors for background traffic
+					return
+				}
+			}(*lbIP)
+		}
+	}()
+
+	// Keep sending configured synthetic request load continuously (req/s per app instance), routed through LB.
+	go func() {
+		// Wait 5 minutes before starting on-demand load to allow instances to boot
+		time.Sleep(5 * time.Minute)
+		
 		client := &http.Client{Timeout: 3 * time.Second}
 		ticker := time.NewTicker(1 * time.Second)
 		defer ticker.Stop()
@@ -208,16 +237,21 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string) {
 			}
 			requestLoadMu.Unlock()
 
-			for ip, rps := range currentLoad {
-				for i := 0; i < rps; i++ {
-					go func(targetIP string) {
-						resp, err := client.Get(fmt.Sprintf("http://%s:8080/request", targetIP))
+			// Route traffic through the load balancer instead of direct app instances
+			totalRPS := 0
+			for _, rps := range currentLoad {
+				totalRPS += rps
+			}
+			if totalRPS > 0 && *lbIP != "" {
+				for i := 0; i < totalRPS; i++ {
+					go func(lbIP string) {
+						resp, err := client.Get(fmt.Sprintf("http://%s/request", lbIP))
 						if err != nil {
-							log.Printf("[REQUEST LOAD] Failed /request on %s: %v", targetIP, err)
+							// Silently ignore errors during load testing
 							return
 						}
 						resp.Body.Close()
-					}(ip)
+					}(*lbIP)
 				}
 			}
 		}
@@ -252,9 +286,9 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string) {
 				err := checkLBHealth(ip)
 				if err != nil {
 					status.Healthy = false
-					if time.Since(seenAt) <= instanceStartupGracePeriod && isStartupRelatedError(err) {
+					if time.Since(seenAt) <= InstanceStartupGracePeriod && isStartupRelatedError(err) {
 						status.Status = "STARTING"
-						status.Error = "Load balancer node is starting. Routing will be available shortly."
+						status.Error = "Load balancer node is being reached. Routing will be available shortly."
 					} else {
 						status.Status = "UNREACHABLE"
 						status.Error = fmt.Sprintf("Unable to reach nginx load balancer (%s)", strings.TrimSpace(err.Error()))
@@ -262,6 +296,7 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string) {
 				} else {
 					status.Status = "LB ACTIVE"
 				}
+				status.UptimeSeconds = int64(time.Since(seenAt).Seconds())
 				statuses = append(statuses, status)
 				continue
 			}
@@ -269,13 +304,14 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string) {
 			cpu, requests, err := fetchMetrics(ip)
 			if err != nil {
 				status.Healthy = false
-				if time.Since(seenAt) <= instanceStartupGracePeriod && isStartupRelatedError(err) {
+				if time.Since(seenAt) <= InstanceStartupGracePeriod && isStartupRelatedError(err) {
 					status.Status = "STARTING"
-					status.Error = "Instance is starting. Metrics will appear automatically when the service is ready."
+					status.Error = "Instance is being reached. Metrics will appear automatically when the service is ready."
 				} else {
 					status.Status = "UNREACHABLE"
 					status.Error = formatReachabilityError(err)
 				}
+				status.UptimeSeconds = int64(time.Since(seenAt).Seconds())
 				statuses = append(statuses, status)
 				continue
 			} else if cpu > 70 {
@@ -304,6 +340,7 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string) {
 			lastRequestTimeByIP[ip] = time.Now()
 			requestRateMu.Unlock()
 
+			status.UptimeSeconds = int64(time.Since(seenAt).Seconds())
 			statuses = append(statuses, status)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -444,6 +481,121 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string) {
 		})
 	})
 
+	http.HandleFunc("/api/fail-health", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		ip := strings.TrimSpace(r.URL.Query().Get("ip"))
+		if ip == "" {
+			http.Error(w, "missing ip", http.StatusBadRequest)
+			return
+		}
+
+		if !isKnownInstance(ip, appIPs) {
+			http.Error(w, "ip is not part of app deployment", http.StatusBadRequest)
+			return
+		}
+
+		seconds := 120
+		if rawSeconds := strings.TrimSpace(r.URL.Query().Get("seconds")); rawSeconds != "" {
+			parsed, err := strconv.Atoi(rawSeconds)
+			if err == nil && parsed > 0 && parsed <= 900 {
+				seconds = parsed
+			}
+		}
+
+		client := &http.Client{Timeout: 10 * time.Second}
+		url := fmt.Sprintf("http://%s:8080/fail-health?seconds=%d", ip, seconds)
+		resp, err := client.Post(url, "application/json", nil)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to inject health failure: %v", err), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			body, _ := ioutil.ReadAll(resp.Body)
+			http.Error(w, fmt.Sprintf("instance rejected fail-health request: %s", strings.TrimSpace(string(body))), http.StatusBadGateway)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":  "accepted",
+			"ip":      ip,
+			"seconds": seconds,
+		})
+	})
+
+	// Test control endpoints - tests only start when explicitly triggered
+	http.HandleFunc("/api/test/cpu-load", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"status":  "started",
+			"test":    "cpu-load",
+			"message": "CPU Load Test started (3 minutes). Check console for progress.",
+		})
+
+		// Run test in background
+		go runCPULoadTest(scalingConfig, getActiveIPs)
+	})
+
+	http.HandleFunc("/api/test/traffic-spike", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"status":  "started",
+			"test":    "traffic-spike",
+			"message": "Traffic Spike Test started (2 minutes). Check console for progress.",
+		})
+
+		// Run test in background
+		go runTrafficSpikeTest(scalingConfig, getLoadBalancerIP)
+	})
+
+	// Graceful shutdown endpoint - destroys all infrastructure
+	http.HandleFunc("/api/shutdown", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"status":  "shutting_down",
+			"message": "Initiating graceful shutdown... destroying Terraform infrastructure.",
+		})
+
+		// Run terraform destroy in background
+		go func() {
+			fmt.Println("\n╔════════════════════════════════════════════════════════════════════╗")
+			fmt.Println("║     GRACEFUL SHUTDOWN INITIATED                                  ║")
+			fmt.Println("╚════════════════════════════════════════════════════════════════════╝\n")
+
+			cmd := exec.Command("terraform", "destroy", "-auto-approve")
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			err := cmd.Run()
+			if err != nil {
+				fmt.Printf("[SHUTDOWN ERROR] Terraform destroy failed: %v\n", err)
+			} else {
+				fmt.Println("\n[SHUTDOWN SUCCESS] All infrastructure has been destroyed.")
+				fmt.Println("[SHUTDOWN SUCCESS] All provisioned instances have been deleted.")
+			}
+		}()
+	})
+
 	fmt.Println("=== Dashboard running at http://localhost:9090 ===")
 	if err := http.ListenAndServe(":9090", nil); err != nil {
 		log.Fatalf("Dashboard server failed: %v", err)
@@ -453,6 +605,7 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string) {
 type ScalingConfig struct {
 	CPUMonitoring           bool
 	RequestRateMonitoring   bool
+	AutoReplaceUnhealthy    bool
 	
 	ImmediateScaling        bool
 	ScaleUpTimeWindow       bool
@@ -509,7 +662,7 @@ func selectScalingOptions() ScalingConfig {
 	fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	fmt.Println("HEALTH & RELIABILITY")
 	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	// config.HealthChecks = getUserConfirmation("  [REQ-5.1] Enable /health endpoint checks?")
+	config.AutoReplaceUnhealthy = getUserConfirmation("  [REQ-5.3] Auto-replace unhealthy instances after repeated health check failures?")
 	// if config.HealthChecks {
 	// 	config.HealthCheckRecovery = getUserConfirmation("    [REQ-5.3] Terminate unhealthy instances?")
 	// 	config.HealthCheckLogging = getUserConfirmation("    [REQ-5.4] Log health check failures?")
@@ -544,6 +697,10 @@ func selectScalingOptions() ScalingConfig {
 }
 
 func getUserConfirmation(prompt string) bool {
+	if autoYes {
+		fmt.Println(prompt + " (y/n): y")
+		return true
+	}
 	for {
 		fmt.Print(prompt + " (y/n): ")
 		var response string
@@ -577,6 +734,8 @@ func displayScalingConfiguration(config ScalingConfig) {
 	// fmt.Printf("    [%s] Health Checks\n", map[bool]string{true: "✓", false: "✗"}[config.HealthChecks])
 	// fmt.Printf("    [%s] Health Check Recovery\n", map[bool]string{true: "✓", false: "✗"}[config.HealthCheckRecovery])
 	// fmt.Printf("    [%s] Health Check Logging\n", map[bool]string{true: "✓", false: "✗"}[config.HealthCheckLogging])
+	fmt.Println("\n  HEALTH & RELIABILITY:")
+	fmt.Printf("    [%s] Auto-replace unhealthy instances\n", map[bool]string{true: "✓", false: "✗"}[config.AutoReplaceUnhealthy])
 	fmt.Println("\n  SERVICE DISCOVERY & LB:")
 	fmt.Printf("    [%s] Service Discovery\n", map[bool]string{true: "✓", false: "✗"}[config.ServiceDiscovery])
 	fmt.Printf("    [%s] Load Balancing\n", map[bool]string{true: "✓", false: "✗"}[config.LoadBalancing])
@@ -605,6 +764,13 @@ func saveScalingConfigToFile(config ScalingConfig) {
 }
 
 func main() {
+	flag.BoolVar(&autoYes, "y", false, "Automatically answer 'yes' to all configuration questions")
+	flag.Parse()
+
+	if autoYes {
+		fmt.Println("Auto-yes mode enabled (-y flag). All prompts will be answered with 'yes'.\n")
+	}
+
 	scalingConfig := selectScalingOptions()
 
 	fmt.Println("=== Running Terraform Apply ===")
@@ -657,7 +823,17 @@ func main() {
 	fmt.Printf("Load balancer sender IP: %s\n", lbIP)
 	fmt.Printf("Scalable app IPs: %s\n", strings.Join(appIPs, ", "))
 
-	go startDashboard(&allIPs, &appIPs, &lbIP)
+	fmt.Println("\n╔════════════════════════════════════════════════════════════════════╗")
+	fmt.Println("║     LOAD BALANCER CONFIGURATION                                   ║")
+	fmt.Println("╚════════════════════════════════════════════════════════════════════╝\n")
+	fmt.Printf("✓ Load Balancer Entry Point: http://%s (port 80)\n", lbIP)
+	fmt.Println("✓ Traffic Routing: All requests routed through nginx load balancer")
+	fmt.Println("✓ Health Monitoring: Active endpoint checking on all instances")
+	fmt.Printf("✓ Auto-Replace Unhealthy: %v\n", scalingConfig.AutoReplaceUnhealthy)
+	fmt.Println("✓ Continuous Background Traffic: Enabled (baseline + on-demand)")
+	fmt.Println("✓ Failed Instance Recovery: Automatic provisioning enabled\n")
+
+	go startDashboard(&allIPs, &appIPs, &lbIP, scalingConfig)
 	time.AfterFunc(1*time.Second, func() {
 		openBrowser("http://localhost:9090")
 	})
@@ -706,8 +882,10 @@ func main() {
 	}()
 
 	fmt.Println("=== Starting Scaler ===")
-	args := append([]string{"run", "scaler.go"}, appIPs...)
+	// Run all Go files in current directory so scaler.go can access deploy.go functions/constants
+	args := append([]string{"run", "."}, appIPs...)
 	scalerCmd := exec.Command("go", args...)
+	scalerCmd.Env = append(os.Environ(), fmt.Sprintf("AUTO_REPLACE_UNHEALTHY=%t", scalingConfig.AutoReplaceUnhealthy))
 	scalerCmd.Stdout = os.Stdout
 	scalerCmd.Stderr = os.Stderr
 	if err := scalerCmd.Start(); err != nil {
@@ -755,29 +933,12 @@ func main() {
 	// }
 
 	fmt.Println("\n╔════════════════════════════════════════════════════════════════════╗")
-	fmt.Println("║     LAUNCHING REQUIREMENT-BASED TESTS                            ║")
+	fmt.Println("║     TESTS AVAILABLE FOR MANUAL TRIGGERING                        ║")
 	fmt.Println("╚════════════════════════════════════════════════════════════════════╝\n")
 
-	stressedIPs := make(map[string]bool)
-	var wg sync.WaitGroup
-
-	if scalingConfig.CPUMonitoring {
-		fmt.Println("[TEST GENERATOR] CPU Load Test - Will generate CPU load to trigger scale-up")
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			runCPULoadTest(scalingConfig, getActiveIPs)
-		}()
-	}
-
-	if scalingConfig.RequestRateMonitoring {
-		fmt.Println("[TEST GENERATOR] Traffic Spike Test - Will blast instances with traffic to trigger scale-up")
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			runTrafficSpikeTest(scalingConfig, getLoadBalancerIP)
-		}()
-	}
+	fmt.Println("[TESTS] CPU Load Test - Available at /api/test/cpu-load")
+	fmt.Println("[TESTS] Traffic Spike Test - Available at /api/test/traffic-spike")
+	fmt.Println("[TESTS] Open http://localhost:9090 to access test controls\n")
 
 	// if scalingConfig.HealthChecks && scalingConfig.HealthCheckRecovery {
 	// 	fmt.Println("[TEST GENERATOR] Health Check Test - Will monitor instance health and recovery")
@@ -810,28 +971,8 @@ func main() {
 	// 	}()
 	// }
 
-	fmt.Println()
-
-	go func() {
-		for {
-			currentIPs := getActiveIPs()
-			for _, ip := range currentIPs {
-				if stressedIPs[ip] {
-					continue
-				}
-				fmt.Printf("[AUTO-DISCOVER] New instance detected: %s... ", ip)
-				_, err := fetchCPU(ip)
-				if err != nil {
-					fmt.Printf("NOT READY (%v)\n", err)
-					continue
-				}
-				fmt.Println("OK — launching continuous health checks")
-				stressedIPs[ip] = true
-				go stressTest(ip, 5, 20*time.Second)
-			}
-			time.Sleep(30 * time.Second)
-		}
-	}()
+	// Disabled: Tests now triggered manually via web UI
+	// Auto-discovery stress testing has been removed
 
 	scalerCmd.Wait()
 }
