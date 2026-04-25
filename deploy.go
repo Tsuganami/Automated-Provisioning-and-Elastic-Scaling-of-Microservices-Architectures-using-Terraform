@@ -715,38 +715,78 @@ func getUserConfirmation(prompt string) bool {
 	}
 }
 
+func initTerraform() {
+	fmt.Println("=== Initializing Terraform ===")
+	initCmd := exec.Command("terraform", "init")
+	initCmd.Stdout = os.Stdout
+	initCmd.Stderr = os.Stderr
+	if err := initCmd.Run(); err != nil {
+		log.Fatalf("Terraform init failed: %v", err)
+	}
+	fmt.Println("=== Terraform Initialization Complete ===")
+}
+
+func loadEnvFile() {
+	data, err := ioutil.ReadFile(".env")
+	if err != nil {
+		log.Fatalf("Failed to read .env file: %v", err)
+	}
+
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+
+		if err := os.Setenv(key, value); err != nil {
+			log.Printf("Warning: Failed to set environment variable %s: %v", key, err)
+		}
+	}
+
+	fmt.Println("AWS credentials loaded from .env file")
+}
+
 func displayScalingConfiguration(config ScalingConfig) {
 	fmt.Println("\n╔════════════════════════════════════════════════════════════════════╗")
 	fmt.Println("║     YOUR SCALING CONFIGURATION                                    ║")
 	fmt.Println("╚════════════════════════════════════════════════════════════════════╝\n")
 	fmt.Println("  METRICS:")
-	fmt.Printf("    [%s] CPU Monitoring\n", map[bool]string{true: "✓", false: "✗"}[config.CPUMonitoring])
-	fmt.Printf("    [%s] Request Rate Monitoring\n", map[bool]string{true: "✓", false: "✗"}[config.RequestRateMonitoring])
+	fmt.Printf("    [%s] CPU Monitoring\n", map[bool]string{true: "YES", false: "NO"}[config.CPUMonitoring])
+	fmt.Printf("    [%s] Request Rate Monitoring\n", map[bool]string{true: "YES", false: "NO"}[config.RequestRateMonitoring])
 	// fmt.Println("\n  SCALING BEHAVIOR:")
-	// fmt.Printf("    [%s] Immediate Scaling\n", map[bool]string{true: "✓", false: "✗"}[config.ImmediateScaling])
-	// fmt.Printf("    [%s] 2-Min Scale-Up Window\n", map[bool]string{true: "✓", false: "✗"}[config.ScaleUpTimeWindow])
-	// fmt.Printf("    [%s] 5-Min Scale-Down Window\n", map[bool]string{true: "✓", false: "✗"}[config.ScaleDownTimeWindow])
+	// fmt.Printf("    [%s] Immediate Scaling\n", map[bool]string{true: "YES", false: "NO"}[config.ImmediateScaling])
+	// fmt.Printf("    [%s] 2-Min Scale-Up Window\n", map[bool]string{true: "YES", false: "NO"}[config.ScaleUpTimeWindow])
+	// fmt.Printf("    [%s] 5-Min Scale-Down Window\n", map[bool]string{true: "YES", false: "NO"}[config.ScaleDownTimeWindow])
 	// fmt.Println("\n  LIMITS & SAFETY:")
-	// fmt.Printf("    [%s] Enforce Min 2 Instances\n", map[bool]string{true: "✓", false: "✗"}[config.EnforceMinInstances])
-	// fmt.Printf("    [%s] Enforce Max 10 Instances\n", map[bool]string{true: "✓", false: "✗"}[config.EnforceMaxInstances])
-	// fmt.Printf("    [%s] 3-Min Cooldown Period\n", map[bool]string{true: "✓", false: "✗"}[config.EnforceCooldown])
+	// fmt.Printf("    [%s] Enforce Min 2 Instances\n", map[bool]string{true: "YES", false: "NO"}[config.EnforceMinInstances])
+	// fmt.Printf("    [%s] Enforce Max 10 Instances\n", map[bool]string{true: "YES", false: "NO"}[config.EnforceMaxInstances])
+	// fmt.Printf("    [%s] 3-Min Cooldown Period\n", map[bool]string{true: "YES", false: "NO"}[config.EnforceCooldown])
 	// fmt.Println("\n  HEALTH & RELIABILITY:")
-	// fmt.Printf("    [%s] Health Checks\n", map[bool]string{true: "✓", false: "✗"}[config.HealthChecks])
-	// fmt.Printf("    [%s] Health Check Recovery\n", map[bool]string{true: "✓", false: "✗"}[config.HealthCheckRecovery])
-	// fmt.Printf("    [%s] Health Check Logging\n", map[bool]string{true: "✓", false: "✗"}[config.HealthCheckLogging])
+	// fmt.Printf("    [%s] Health Checks\n", map[bool]string{true: "YES", false: "NO"}[config.HealthChecks])
+	// fmt.Printf("    [%s] Health Check Recovery\n", map[bool]string{true: "YES", false: "NO"}[config.HealthCheckRecovery])
+	// fmt.Printf("    [%s] Health Check Logging\n", map[bool]string{true: "YES", false: "NO"}[config.HealthCheckLogging])
 	fmt.Println("\n  HEALTH & RELIABILITY:")
-	fmt.Printf("    [%s] Auto-replace unhealthy instances\n", map[bool]string{true: "✓", false: "✗"}[config.AutoReplaceUnhealthy])
+	fmt.Printf("    [%s] Auto-replace unhealthy instances\n", map[bool]string{true: "YES", false: "NO"}[config.AutoReplaceUnhealthy])
 	fmt.Println("\n  SERVICE DISCOVERY & LB:")
-	fmt.Printf("    [%s] Service Discovery\n", map[bool]string{true: "✓", false: "✗"}[config.ServiceDiscovery])
-	fmt.Printf("    [%s] Load Balancing\n", map[bool]string{true: "✓", false: "✗"}[config.LoadBalancing])
-	fmt.Printf("    [%s] Sticky Sessions\n", map[bool]string{true: "✓", false: "✗"}[config.StickySessionsLB])
+	fmt.Printf("    [%s] Service Discovery\n", map[bool]string{true: "YES", false: "NO"}[config.ServiceDiscovery])
+	fmt.Printf("    [%s] Load Balancing\n", map[bool]string{true: "YES", false: "NO"}[config.LoadBalancing])
+	fmt.Printf("    [%s] Sticky Sessions\n", map[bool]string{true: "YES", false: "NO"}[config.StickySessionsLB])
 	// fmt.Println("\n  OBSERVABILITY:")
-	// fmt.Printf("    [%s] Prometheus Metrics\n", map[bool]string{true: "✓", false: "✗"}[config.PrometheusMetrics])
-	// fmt.Printf("    [%s] Metrics Retention (7d)\n", map[bool]string{true: "✓", false: "✗"}[config.MetricsRetention])
-	// fmt.Printf("    [%s] Scaling Event Logging\n", map[bool]string{true: "✓", false: "✗"}[config.ScalingLogging])
+	// fmt.Printf("    [%s] Prometheus Metrics\n", map[bool]string{true: "YES", false: "NO"}[config.PrometheusMetrics])
+	// fmt.Printf("    [%s] Metrics Retention (7d)\n", map[bool]string{true: "YES", false: "NO"}[config.MetricsRetention])
+	// fmt.Printf("    [%s] Scaling Event Logging\n", map[bool]string{true: "YES", false: "NO"}[config.ScalingLogging])
 	// fmt.Println("\n  SECURITY:")
-	// fmt.Printf("    [%s] TLS Communication\n", map[bool]string{true: "✓", false: "✗"}[config.TLSCommunication])
-	// fmt.Printf("    [%s] Encrypted Terraform State\n", map[bool]string{true: "✓", false: "✗"}[config.EncryptedState])
+	// fmt.Printf("    [%s] TLS Communication\n", map[bool]string{true: "YES", false: "NO"}[config.TLSCommunication])
+	// fmt.Printf("    [%s] Encrypted Terraform State\n", map[bool]string{true: "YES", false: "NO"}[config.EncryptedState])
 	fmt.Println()
 	
 	saveScalingConfigToFile(config)
@@ -758,12 +798,14 @@ func saveScalingConfigToFile(config ScalingConfig) {
 	if err != nil {
 		log.Printf("Warning: Could not save scaling config to file: %v", err)
 	} else {
-		fmt.Println("✓ Configuration saved to: scaling_config.json")
+		fmt.Println("Configuration saved to: scaling_config.json")
 		fmt.Println()
 	}
 }
 
 func main() {
+	loadEnvFile()
+
 	flag.BoolVar(&autoYes, "y", false, "Automatically answer 'yes' to all configuration questions")
 	flag.Parse()
 
@@ -772,6 +814,8 @@ func main() {
 	}
 
 	scalingConfig := selectScalingOptions()
+
+	initTerraform()
 
 	fmt.Println("=== Running Terraform Apply ===")
 	applyCmd := exec.Command("terraform", "apply", "-auto-approve")
@@ -974,7 +1018,26 @@ func main() {
 	// Disabled: Tests now triggered manually via web UI
 	// Auto-discovery stress testing has been removed
 
-	scalerCmd.Wait()
+	// Keep process alive, restart scaler if it crashes
+	for {
+		fmt.Println("[SCALER] Waiting for scaler process...")
+		if err := scalerCmd.Wait(); err != nil {
+			fmt.Printf("[SCALER] Scaler exited with error: %v\n", err)
+		} else {
+			fmt.Println("[SCALER] Scaler exited normally")
+		}
+		
+		fmt.Println("[SCALER] Restarting scaler in 5 seconds...")
+		time.Sleep(5 * time.Second)
+		
+		scalerCmd = exec.Command("go", args...)
+		scalerCmd.Env = append(os.Environ(), fmt.Sprintf("AUTO_REPLACE_UNHEALTHY=%t", scalingConfig.AutoReplaceUnhealthy))
+		scalerCmd.Stdout = os.Stdout
+		scalerCmd.Stderr = os.Stderr
+		if err := scalerCmd.Start(); err != nil {
+			fmt.Printf("[SCALER] Failed to restart scaler: %v\n", err)
+		}
+	}
 }
 
 func getActiveIPs() []string {
