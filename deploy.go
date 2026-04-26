@@ -3,8 +3,8 @@ package main
 import (
 	"errors"
 	"encoding/json"
-	"flag"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -14,12 +14,96 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
-const InstanceStartupGracePeriod = 4 * time.Minute
+const instanceStartupGracePeriod = 4 * time.Minute
 
-var autoYes bool
+const (
+	phaseAwaitingConfig	int32	= 0
+	phaseProvisioning	int32	= 1
+	phaseReady		int32	= 2
+)
+
+var (
+	systemPhase		atomic.Int32
+	configReceivedCh	= make(chan map[string]interface{}, 1)
+	userConfigMu		sync.RWMutex
+	userConfig		map[string]interface{}
+)
+
+const provisioningPageHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Provisioning - APS</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body{background:radial-gradient(circle at top left,rgba(59,130,246,.22),transparent 30%),radial-gradient(circle at top right,rgba(16,185,129,.16),transparent 24%),linear-gradient(180deg,#030712 0%,#0f172a 55%,#020617 100%);min-height:100vh;color:#fff;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center}
+  .spinner{width:48px;height:48px;border:4px solid rgba(255,255,255,.15);border-top-color:#38bdf8;border-radius:50%;animation:spin 1s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+  <div class="text-center max-w-lg px-6">
+    <p class="text-xs uppercase tracking-[0.35em] text-sky-300/80">System Initialization</p>
+    <h1 class="mt-2 text-3xl md:text-4xl font-semibold">Provisioning Infrastructure</h1>
+    <p class="mt-3 text-sm md:text-base text-slate-300">Terraform is creating your instances. This typically takes 1-2 minutes. The dashboard will load automatically when ready.</p>
+    <div class="mt-8 flex justify-center"><div class="spinner"></div></div>
+    <p id="status" class="mt-6 text-xs text-slate-400">Starting...</p>
+  </div>
+<script>
+  const status = document.getElementById('status');
+  let attempts = 0;
+  async function poll(){
+    attempts++;
+    try {
+      const r = await fetch('/api/ready', { cache: 'no-store' });
+      const j = await r.json();
+      if (j.ready) {
+        status.textContent = 'Ready - loading dashboard...';
+        setTimeout(()=>{ window.location.href = '/'; }, 400);
+        return;
+      }
+      status.textContent = 'Provisioning... (' + attempts + ')';
+    } catch (e) {
+      status.textContent = 'Waiting for backend... (' + attempts + ')';
+    }
+    setTimeout(poll, 2000);
+  }
+  poll();
+</script>
+</body>
+</html>`
+
+func setupLogging() {
+	logFile, err := os.OpenFile("log.txt", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		fmt.Printf("WARNING: could not open log.txt for writing: %v\n", err)
+		return
+	}
+
+	origStdout := os.Stdout
+	origStderr := os.Stderr
+	mw := io.MultiWriter(origStdout, logFile)
+	mwErr := io.MultiWriter(origStderr, logFile)
+
+	rOut, wOut, err := os.Pipe()
+	if err == nil {
+		os.Stdout = wOut
+		go io.Copy(mw, rOut)
+	}
+
+	rErr, wErr, err := os.Pipe()
+	if err == nil {
+		os.Stderr = wErr
+		go io.Copy(mwErr, rErr)
+	}
+
+	log.SetOutput(mw)
+	fmt.Printf("=== Logging session output to log.txt (%s) ===\n", time.Now().Format(time.RFC3339))
+}
 
 func openBrowser(url string) {
 	var cmd *exec.Cmd
@@ -70,25 +154,26 @@ func fetchCPU(ip string) (float64, error) {
 	return 0, fmt.Errorf("cpu metric not found")
 }
 
-func fetchMetrics(ip string) (float64, float64, error) {
+func fetchMetrics(ip string) (float64, float64, float64, error) {
 	client := http.Client{Timeout: 12 * time.Second}
 	resp, err := client.Get(fmt.Sprintf("http://%s:8080/metrics", ip))
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	defer resp.Body.Close()
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 
 	var cpuValue float64
 	var requestCount float64
+	var networkBytes float64
 	var foundCPU bool
 	var foundRequests bool
 	for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "cpu_utilization ") || strings.HasPrefix(line, "request_count ") {
+		if strings.HasPrefix(line, "cpu_utilization ") || strings.HasPrefix(line, "request_count ") || strings.HasPrefix(line, "network_bytes_total ") {
 			parts := strings.Fields(line)
 			if len(parts) < 2 {
 				continue
@@ -104,15 +189,17 @@ func fetchMetrics(ip string) (float64, float64, error) {
 			case "request_count":
 				requestCount = value
 				foundRequests = true
+			case "network_bytes_total":
+				networkBytes = value
 			}
 		}
 	}
 
 	if !foundCPU && !foundRequests {
-		return 0, 0, fmt.Errorf("metrics not found")
+		return 0, 0, 0, fmt.Errorf("metrics not found")
 	}
 
-	return cpuValue, requestCount, nil
+	return cpuValue, requestCount, networkBytes, nil
 }
 
 func isStartupRelatedError(err error) bool {
@@ -155,27 +242,18 @@ func checkLBHealth(ip string) error {
 }
 
 type instanceStatus struct {
-	IP           string  `json:"ip"`
-	Role         string  `json:"role"`
-	CPUPercent   float64 `json:"cpu_percent"`
-	RequestCount float64 `json:"request_count"`
-	RequestRate  float64 `json:"request_rate"`
-	Status       string  `json:"status"`
-	Healthy      bool    `json:"healthy"`
-	UptimeSeconds int64  `json:"uptime_seconds"`
-	Error        string  `json:"error,omitempty"`
+	IP			string	`json:"ip"`
+	Role			string	`json:"role"`
+	CPUPercent		float64	`json:"cpu_percent"`
+	RequestCount		float64	`json:"request_count"`
+	RequestRate		float64	`json:"request_rate"`
+	NetworkThroughput	float64	`json:"network_throughput"`
+	Status			string	`json:"status"`
+	Healthy			bool	`json:"healthy"`
+	Error			string	`json:"error,omitempty"`
 }
 
-func isKnownInstance(ip string, ips *[]string) bool {
-	for _, knownIP := range *ips {
-		if knownIP == ip {
-			return true
-		}
-	}
-	return false
-}
-
-func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string, scalingConfig ScalingConfig) {
+func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string) {
 	instanceSeenAt := make(map[string]time.Time)
 	var instanceSeenMu sync.Mutex
 	var requestRateMu sync.Mutex
@@ -184,86 +262,159 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string, scalingCon
 	var lastRequestSampleTime time.Time
 	lastRequestByIP := make(map[string]float64)
 	lastRequestTimeByIP := make(map[string]time.Time)
-	requestLoadRPSByIP := make(map[string]int)
+	lastNetworkByIP := make(map[string]float64)
+	lastNetworkTimeByIP := make(map[string]time.Time)
+	requestLoadRPS := 0
+
+	removedIPs := make(map[string]bool)
+	var removedMu sync.Mutex
 	for _, ip := range *allIPs {
 		instanceSeenAt[ip] = time.Now()
 	}
 
-	// Continuous background traffic through the load balancer (entry point for all traffic)
-	// Wait 5 minutes before starting to allow instances to fully boot
 	go func() {
-		time.Sleep(5 * time.Minute)
-		
-		client := &http.Client{Timeout: 5 * time.Second}
-		ticker := time.NewTicker(100 * time.Millisecond) // 10 req/s baseline
+		transport := &http.Transport{
+			MaxIdleConns:		200,
+			MaxIdleConnsPerHost:	200,
+			IdleConnTimeout:	30 * time.Second,
+		}
+		client := &http.Client{Timeout: 5 * time.Second, Transport: transport}
+		ticker := time.NewTicker(50 * time.Millisecond)
 		defer ticker.Stop()
+		subtick := 0
 		for range ticker.C {
-			if *lbIP == "" {
+			requestLoadMu.RLock()
+			currentRPS := requestLoadRPS
+			requestLoadMu.RUnlock()
+
+			if currentRPS <= 0 {
+				subtick = 0
 				continue
 			}
-			go func(lbIP string) {
-				_, err := client.Get(fmt.Sprintf("http://%s/request", lbIP))
-				if err != nil {
-					// Silently ignore errors for background traffic
-					return
-				}
-			}(*lbIP)
+
+			targetLB := strings.TrimSpace(*lbIP)
+			if targetLB == "" {
+				continue
+			}
+
+			perTick := currentRPS / 20
+			remainder := currentRPS % 20
+			n := perTick
+			if subtick < remainder {
+				n++
+			}
+			subtick = (subtick + 1) % 20
+
+			for i := 0; i < n; i++ {
+				go func(targetIP string) {
+					resp, err := client.Get(fmt.Sprintf("http://%s/request", targetIP))
+					if err != nil {
+						return
+					}
+					_, _ = io.Copy(io.Discard, resp.Body)
+					resp.Body.Close()
+				}(targetLB)
+			}
 		}
 	}()
 
-	// Keep sending configured synthetic request load continuously (req/s per app instance), routed through LB.
 	go func() {
-		// Wait 5 minutes before starting on-demand load to allow instances to boot
-		time.Sleep(5 * time.Minute)
-		
-		client := &http.Client{Timeout: 3 * time.Second}
-		ticker := time.NewTicker(1 * time.Second)
+		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
-			knownApps := make(map[string]struct{}, len(*appIPs))
-			for _, ip := range *appIPs {
-				knownApps[ip] = struct{}{}
+			requestLoadMu.RLock()
+			currentRPS := requestLoadRPS
+			requestLoadMu.RUnlock()
+			targetLB := strings.TrimSpace(*lbIP)
+			if targetLB == "" {
+				targetLB = "(LB pending)"
 			}
-
-			requestLoadMu.Lock()
-			for ip := range requestLoadRPSByIP {
-				if _, ok := knownApps[ip]; !ok {
-					delete(requestLoadRPSByIP, ip)
-				}
-			}
-			currentLoad := make(map[string]int, len(requestLoadRPSByIP))
-			for ip, rps := range requestLoadRPSByIP {
-				currentLoad[ip] = rps
-			}
-			requestLoadMu.Unlock()
-
-			// Route traffic through the load balancer instead of direct app instances
-			totalRPS := 0
-			for _, rps := range currentLoad {
-				totalRPS += rps
-			}
-			if totalRPS > 0 && *lbIP != "" {
-				for i := 0; i < totalRPS; i++ {
-					go func(lbIP string) {
-						resp, err := client.Get(fmt.Sprintf("http://%s/request", lbIP))
-						if err != nil {
-							// Silently ignore errors during load testing
-							return
-						}
-						resp.Body.Close()
-					}(*lbIP)
-				}
-			}
+			log.Printf("[TRAFFIC STATUS] Sustained load: %d req/min -> %s", currentRPS*60, targetLB)
 		}
 	}()
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "templates/index.html")
+		switch systemPhase.Load() {
+		case phaseAwaitingConfig:
+			http.ServeFile(w, r, "templates/startup.html")
+		case phaseProvisioning:
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			fmt.Fprint(w, provisioningPageHTML)
+		default:
+			http.ServeFile(w, r, "templates/index.html")
+		}
+	})
+
+	http.HandleFunc("/api/config", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if systemPhase.Load() != phaseAwaitingConfig {
+			http.Error(w, "configuration already submitted", http.StatusConflict)
+			return
+		}
+		var cfg map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+			http.Error(w, fmt.Sprintf("invalid json: %v", err), http.StatusBadRequest)
+			return
+		}
+		userConfigMu.Lock()
+		userConfig = cfg
+		userConfigMu.Unlock()
+
+		if data, err := json.MarshalIndent(cfg, "", "  "); err == nil {
+			_ = ioutil.WriteFile("user_config.json", data, 0644)
+		}
+
+		select {
+		case configReceivedCh <- cfg:
+		default:
+		}
+		log.Println("[STARTUP] User configuration received - beginning provisioning")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	})
+
+	http.HandleFunc("/api/ready", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		phase := systemPhase.Load()
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"phase":	phase,
+			"ready":	phase == phaseReady,
+		})
+	})
+
+	http.HandleFunc("/api/instance-removed", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		ip := strings.TrimSpace(r.URL.Query().Get("ip"))
+		if ip == "" {
+			http.Error(w, "missing ip query parameter", http.StatusBadRequest)
+			return
+		}
+		removedMu.Lock()
+		removedIPs[ip] = true
+		removedMu.Unlock()
+		log.Printf("[INSTANCE REMOVED] %s marked as destroying - hidden from dashboard", ip)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":	"ok",
+			"ip":		ip,
+		})
 	})
 
 	http.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
 		statuses := make([]instanceStatus, 0, len(*allIPs))
 		for _, ip := range *allIPs {
+			removedMu.Lock()
+			gone := removedIPs[ip]
+			removedMu.Unlock()
+			if gone {
+				continue
+			}
 			instanceSeenMu.Lock()
 			seenAt, exists := instanceSeenAt[ip]
 			if !exists {
@@ -277,18 +428,17 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string, scalingCon
 				role = "LB-SENDER"
 			}
 			status := instanceStatus{
-				IP:      ip,
-				Role:    role,
-				Healthy: true,
-				Status:  "ACTIVE",
+				IP:		ip,
+				Role:		role,
+				Healthy:	true,
+				Status:		"ACTIVE",
 			}
 			if role == "LB-SENDER" {
-				err := checkLBHealth(ip)
-				if err != nil {
+				if err := checkLBHealth(ip); err != nil {
 					status.Healthy = false
-					if time.Since(seenAt) <= InstanceStartupGracePeriod && isStartupRelatedError(err) {
+					if time.Since(seenAt) <= instanceStartupGracePeriod && isStartupRelatedError(err) {
 						status.Status = "STARTING"
-						status.Error = "Load balancer node is being reached. Routing will be available shortly."
+						status.Error = "Load balancer node is starting. Routing will be available shortly."
 					} else {
 						status.Status = "UNREACHABLE"
 						status.Error = fmt.Sprintf("Unable to reach nginx load balancer (%s)", strings.TrimSpace(err.Error()))
@@ -296,22 +446,20 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string, scalingCon
 				} else {
 					status.Status = "LB ACTIVE"
 				}
-				status.UptimeSeconds = int64(time.Since(seenAt).Seconds())
 				statuses = append(statuses, status)
 				continue
 			}
 
-			cpu, requests, err := fetchMetrics(ip)
+			cpu, requests, netBytes, err := fetchMetrics(ip)
 			if err != nil {
 				status.Healthy = false
-				if time.Since(seenAt) <= InstanceStartupGracePeriod && isStartupRelatedError(err) {
+				if time.Since(seenAt) <= instanceStartupGracePeriod && isStartupRelatedError(err) {
 					status.Status = "STARTING"
-					status.Error = "Instance is being reached. Metrics will appear automatically when the service is ready."
+					status.Error = "Instance is starting. Metrics will appear automatically when the service is ready."
 				} else {
 					status.Status = "UNREACHABLE"
 					status.Error = formatReachabilityError(err)
 				}
-				status.UptimeSeconds = int64(time.Since(seenAt).Seconds())
 				statuses = append(statuses, status)
 				continue
 			} else if cpu > 70 {
@@ -338,9 +486,23 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string, scalingCon
 			}
 			lastRequestByIP[ip] = requests
 			lastRequestTimeByIP[ip] = time.Now()
+
+			prevNet, hasPrevNet := lastNetworkByIP[ip]
+			prevNetAt, hasPrevNetAt := lastNetworkTimeByIP[ip]
+			if hasPrevNet && hasPrevNetAt {
+				elapsed := time.Since(prevNetAt).Seconds()
+				if elapsed > 0 {
+					delta := netBytes - prevNet
+					if delta < 0 {
+						delta = 0
+					}
+					status.NetworkThroughput = delta / elapsed
+				}
+			}
+			lastNetworkByIP[ip] = netBytes
+			lastNetworkTimeByIP[ip] = time.Now()
 			requestRateMu.Unlock()
 
-			status.UptimeSeconds = int64(time.Since(seenAt).Seconds())
 			statuses = append(statuses, status)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -356,7 +518,15 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string, scalingCon
 		var totalCPU float64
 		var totalRequests float64
 		appHealthyCount := 0
+		visibleCount := 0
 		for _, ip := range *allIPs {
+			removedMu.Lock()
+			gone := removedIPs[ip]
+			removedMu.Unlock()
+			if gone {
+				continue
+			}
+			visibleCount++
 			if ip == *lbIP {
 				err := checkLBHealth(ip)
 				if err != nil {
@@ -367,7 +537,7 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string, scalingCon
 				continue
 			}
 
-			cpu, requests, err := fetchMetrics(ip)
+			cpu, requests, _, err := fetchMetrics(ip)
 			if err != nil {
 				unhealthyCount++
 				continue
@@ -400,12 +570,12 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string, scalingCon
 		requestRateMu.Unlock()
 
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"instance_count":  len(*allIPs),
-			"healthy_count":   healthyCount,
-			"unhealthy_count": unhealthyCount,
-			"average_cpu":     averageCPU,
-			"total_requests":  totalRequests,
-			"request_rate":    requestRate,
+			"instance_count":	visibleCount,
+			"healthy_count":	healthyCount,
+			"unhealthy_count":	unhealthyCount,
+			"average_cpu":		averageCPU,
+			"total_requests":	totalRequests,
+			"request_rate":		requestRate,
 		})
 	})
 
@@ -415,14 +585,9 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string, scalingCon
 			return
 		}
 
-		ip := strings.TrimSpace(r.URL.Query().Get("ip"))
-		if ip == "" {
-			http.Error(w, "missing ip", http.StatusBadRequest)
-			return
-		}
-
-		if !isKnownInstance(ip, appIPs) {
-			http.Error(w, "ip is not part of active deployment", http.StatusBadRequest)
+		targetLB := strings.TrimSpace(*lbIP)
+		if targetLB == "" {
+			http.Error(w, "load balancer ip is unavailable", http.StatusServiceUnavailable)
 			return
 		}
 
@@ -431,21 +596,75 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string, scalingCon
 			client := &http.Client{Timeout: 35 * time.Second}
 			for i := 0; i < burst; i++ {
 				go func() {
-					resp, err := client.Get(fmt.Sprintf("http://%s:8080/work", targetIP))
+					resp, err := client.Get(fmt.Sprintf("http://%s/work", targetIP))
 					if err != nil {
-						log.Printf("[DASHBOARD LOAD] Failed to hit /work on %s: %v", targetIP, err)
+						log.Printf("[DASHBOARD LOAD] Failed to hit /work via LB %s: %v", targetIP, err)
 						return
 					}
 					resp.Body.Close()
 				}()
 			}
-		}(ip)
+		}(targetLB)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":  "accepted",
-			"ip":      ip,
-			"requests": burst,
+			"status":	"accepted",
+			"lb_ip":	targetLB,
+			"requests":	burst,
+		})
+	})
+
+	http.HandleFunc("/api/fail-health", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		targetIP := strings.TrimSpace(r.URL.Query().Get("ip"))
+		if targetIP == "" {
+			http.Error(w, "missing ip query parameter", http.StatusBadRequest)
+			return
+		}
+
+		isApp := false
+		for _, ip := range *appIPs {
+			if ip == targetIP {
+				isApp = true
+				break
+			}
+		}
+		if !isApp {
+			http.Error(w, "ip is not a known app instance", http.StatusBadRequest)
+			return
+		}
+
+		seconds := 120
+		if s := strings.TrimSpace(r.URL.Query().Get("seconds")); s != "" {
+			if parsed, err := strconv.Atoi(s); err == nil && parsed > 0 {
+				seconds = parsed
+			}
+		}
+
+		client := &http.Client{Timeout: 5 * time.Second}
+		scalerURL := fmt.Sprintf("http://127.0.0.1:9091/replace?ip=%s", targetIP)
+		resp, err := client.Post(scalerURL, "application/json", nil)
+		if err != nil {
+			log.Printf("[FAIL-HEALTH] Could not reach scaler control endpoint: %v", err)
+			http.Error(w, fmt.Sprintf("scaler unreachable: %v", err), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode >= 400 {
+			body, _ := ioutil.ReadAll(resp.Body)
+			http.Error(w, fmt.Sprintf("scaler rejected request: %s", strings.TrimSpace(string(body))), resp.StatusCode)
+			return
+		}
+
+		log.Printf("[FAIL-HEALTH] %s marked for replacement (traffic rerouted)", targetIP)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":	"replacing",
+			"ip":		targetIP,
+			"seconds":	seconds,
 		})
 	})
 
@@ -455,96 +674,66 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string, scalingCon
 			return
 		}
 
-		ip := strings.TrimSpace(r.URL.Query().Get("ip"))
-		if ip == "" {
-			http.Error(w, "missing ip", http.StatusBadRequest)
-			return
-		}
-
-		if !isKnownInstance(ip, appIPs) {
-			http.Error(w, "ip is not part of app deployment", http.StatusBadRequest)
+		targetLB := strings.TrimSpace(*lbIP)
+		if targetLB == "" {
+			http.Error(w, "load balancer ip is unavailable", http.StatusServiceUnavailable)
 			return
 		}
 
 		const increaseByRPS = 5
 		requestLoadMu.Lock()
-		requestLoadRPSByIP[ip] += increaseByRPS
-		currentRPS := requestLoadRPSByIP[ip]
+		requestLoadRPS += increaseByRPS
+		currentRPS := requestLoadRPS
 		requestLoadMu.Unlock()
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":      "accepted",
-			"ip":          ip,
-			"added_rps":   increaseByRPS,
-			"current_rps": currentRPS,
+			"status":	"accepted",
+			"lb_ip":	targetLB,
+			"added_rps":	increaseByRPS,
+			"current_rps":	currentRPS,
 		})
 	})
 
-	http.HandleFunc("/api/fail-health", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/api/spike-node", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-
-		ip := strings.TrimSpace(r.URL.Query().Get("ip"))
-		if ip == "" {
-			http.Error(w, "missing ip", http.StatusBadRequest)
+		targetIP := strings.TrimSpace(r.URL.Query().Get("ip"))
+		if targetIP == "" {
+			http.Error(w, "missing ip query parameter", http.StatusBadRequest)
 			return
 		}
 
-		if !isKnownInstance(ip, appIPs) {
-			http.Error(w, "ip is not part of app deployment", http.StatusBadRequest)
-			return
-		}
-
-		seconds := 120
-		if rawSeconds := strings.TrimSpace(r.URL.Query().Get("seconds")); rawSeconds != "" {
-			parsed, err := strconv.Atoi(rawSeconds)
-			if err == nil && parsed > 0 && parsed <= 900 {
-				seconds = parsed
+		isApp := false
+		for _, ip := range *appIPs {
+			if ip == targetIP {
+				isApp = true
+				break
 			}
 		}
-
-		client := &http.Client{Timeout: 10 * time.Second}
-		url := fmt.Sprintf("http://%s:8080/fail-health?seconds=%d", ip, seconds)
-		resp, err := client.Post(url, "application/json", nil)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("failed to inject health failure: %v", err), http.StatusBadGateway)
+		if !isApp {
+			http.Error(w, "ip is not a known app instance", http.StatusBadRequest)
 			return
 		}
-		defer resp.Body.Close()
 
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			body, _ := ioutil.ReadAll(resp.Body)
-			http.Error(w, fmt.Sprintf("instance rejected fail-health request: %s", strings.TrimSpace(string(body))), http.StatusBadGateway)
-			return
-		}
+		go func(ip string) {
+			client := &http.Client{Timeout: 8 * time.Second}
+			resp, err := client.Get(fmt.Sprintf("http://%s:8080/spike", ip))
+			if err != nil {
+				log.Printf("[SPIKE] Failed to trigger spike on %s: %v", ip, err)
+				return
+			}
+			resp.Body.Close()
+			log.Printf("[SPIKE] CPU spike injected on %s - self-healer should replace it shortly", ip)
+		}(targetIP)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":  "accepted",
-			"ip":      ip,
-			"seconds": seconds,
+			"status":	"accepted",
+			"ip":		targetIP,
 		})
-	})
-
-	// Test control endpoints - tests only start when explicitly triggered
-	http.HandleFunc("/api/test/cpu-load", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{
-			"status":  "started",
-			"test":    "cpu-load",
-			"message": "CPU Load Test started (3 minutes). Check console for progress.",
-		})
-
-		// Run test in background
-		go runCPULoadTest(scalingConfig, getActiveIPs)
 	})
 
 	http.HandleFunc("/api/test/traffic-spike", func(w http.ResponseWriter, r *http.Request) {
@@ -552,48 +741,95 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string, scalingCon
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		targetLB := strings.TrimSpace(*lbIP)
+		if targetLB == "" {
+			http.Error(w, "load balancer ip is unavailable", http.StatusServiceUnavailable)
+			return
+		}
+
+		const stepRPS = 10
+		requestLoadMu.Lock()
+		requestLoadRPS += stepRPS
+		currentRPS := requestLoadRPS
+		requestLoadMu.Unlock()
+
+		currentRPM := currentRPS * 60
+		log.Printf("[TRAFFIC SPIKE] +600 req/min -> sustained load now %d req/min via LB %s", currentRPM, targetLB)
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{
-			"status":  "started",
-			"test":    "traffic-spike",
-			"message": "Traffic Spike Test started (2 minutes). Check console for progress.",
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":	"accepted",
+			"lb_ip":	targetLB,
+			"added_rpm":	600,
+			"current_rpm":	currentRPM,
+			"message":	fmt.Sprintf("Sustained traffic increased by 600 req/min. Current load: %d req/min through LB %s.", currentRPM, targetLB),
 		})
-
-		// Run test in background
-		go runTrafficSpikeTest(scalingConfig, getLoadBalancerIP)
 	})
 
-	// Graceful shutdown endpoint - destroys all infrastructure
-	http.HandleFunc("/api/shutdown", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/api/test/traffic-reduce", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		targetLB := strings.TrimSpace(*lbIP)
+
+		const stepRPS = 10
+		requestLoadMu.Lock()
+		requestLoadRPS -= stepRPS
+		if requestLoadRPS < 0 {
+			requestLoadRPS = 0
+		}
+		currentRPS := requestLoadRPS
+		requestLoadMu.Unlock()
+
+		currentRPM := currentRPS * 60
+		log.Printf("[TRAFFIC REDUCE] -600 req/min -> sustained load now %d req/min", currentRPM)
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{
-			"status":  "shutting_down",
-			"message": "Initiating graceful shutdown... destroying Terraform infrastructure.",
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":	"accepted",
+			"lb_ip":	targetLB,
+			"removed_rpm":	600,
+			"current_rpm":	currentRPM,
+			"message":	fmt.Sprintf("Sustained traffic reduced by 600 req/min. Current load: %d req/min.", currentRPM),
 		})
+	})
 
-		// Run terraform destroy in background
-		go func() {
-			fmt.Println("\n╔════════════════════════════════════════════════════════════════════╗")
-			fmt.Println("║     GRACEFUL SHUTDOWN INITIATED                                  ║")
-			fmt.Println("╚════════════════════════════════════════════════════════════════════╝\n")
+	http.HandleFunc("/api/test/cpu-load", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		targetLB := strings.TrimSpace(*lbIP)
+		if targetLB == "" {
+			http.Error(w, "load balancer ip is unavailable", http.StatusServiceUnavailable)
+			return
+		}
 
-			cmd := exec.Command("terraform", "destroy", "-auto-approve")
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			err := cmd.Run()
-			if err != nil {
-				fmt.Printf("[SHUTDOWN ERROR] Terraform destroy failed: %v\n", err)
-			} else {
-				fmt.Println("\n[SHUTDOWN SUCCESS] All infrastructure has been destroyed.")
-				fmt.Println("[SHUTDOWN SUCCESS] All provisioned instances have been deleted.")
+		go func(lb string) {
+			log.Printf("[CPU LOAD TEST] Sending /work bursts via LB %s", lb)
+			client := &http.Client{Timeout: 35 * time.Second}
+			deadline := time.Now().Add(3 * time.Minute)
+			for time.Now().Before(deadline) {
+				for i := 0; i < 20; i++ {
+					go func() {
+						resp, err := client.Get(fmt.Sprintf("http://%s/work", lb))
+						if err == nil {
+							resp.Body.Close()
+						}
+					}()
+				}
+				time.Sleep(1 * time.Second)
 			}
-		}()
+			log.Printf("[CPU LOAD TEST] Complete")
+		}(targetLB)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":	"accepted",
+			"lb_ip":	targetLB,
+			"message":	fmt.Sprintf("CPU load test started via load balancer %s (3 minutes of /work bursts).", targetLB),
+		})
 	})
 
 	fmt.Println("=== Dashboard running at http://localhost:9090 ===")
@@ -603,104 +839,91 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string, scalingCon
 }
 
 type ScalingConfig struct {
-	CPUMonitoring           bool
-	RequestRateMonitoring   bool
-	AutoReplaceUnhealthy    bool
-	
-	ImmediateScaling        bool
-	ScaleUpTimeWindow       bool
-	ScaleDownTimeWindow     bool
-	
-	EnforceMinInstances     bool
-	EnforceMaxInstances     bool
-	
-	EnforceCooldown         bool
-	
-	HealthChecks            bool
-	HealthCheckRecovery     bool
-	
-	ServiceDiscovery        bool
-	LoadBalancing           bool
-	StickySessionsLB        bool
-	
-	PrometheusMetrics       bool
-	MetricsRetention        bool
-	HealthCheckLogging      bool
-	ScalingLogging          bool
-	
-	TLSCommunication        bool
-	EncryptedState          bool
+	CPUMonitoring		bool
+	RequestRateMonitoring	bool
+
+	ImmediateScaling	bool
+	ScaleUpTimeWindow	bool
+	ScaleDownTimeWindow	bool
+
+	EnforceMinInstances	bool
+	EnforceMaxInstances	bool
+
+	EnforceCooldown	bool
+
+	HealthChecks		bool
+	HealthCheckRecovery	bool
+
+	ServiceDiscovery	bool
+	LoadBalancing		bool
+	StickySessionsLB	bool
+
+	PrometheusMetrics	bool
+	MetricsRetention	bool
+	HealthCheckLogging	bool
+	ScalingLogging		bool
+
+	TLSCommunication	bool
+	EncryptedState		bool
 }
 
-func selectScalingOptions() ScalingConfig {
+func selectScalingOptions(yes bool) ScalingConfig {
 	config := ScalingConfig{}
+	if yes {
+		config.CPUMonitoring = true
+		config.RequestRateMonitoring = true
+		config.ImmediateScaling = true
+		config.ServiceDiscovery = true
+		config.LoadBalancing = true
+		config.StickySessionsLB = true
+	} else {
+		fmt.Println("\n╔════════════════════════════════════════════════════════════════════╗")
+		fmt.Println("║     CONFIGURE SCALING OPTIONS FOR THIS TEST                        ║")
+		fmt.Println("╚════════════════════════════════════════════════════════════════════╝\n")
 
-	fmt.Println("\n╔════════════════════════════════════════════════════════════════════╗")
-	fmt.Println("║     CONFIGURE SCALING OPTIONS FOR THIS TEST                        ║")
-	fmt.Println("╚════════════════════════════════════════════════════════════════════╝\n")
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		fmt.Println("SCALING METRICS (What triggers scaling)")
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		config.CPUMonitoring = getUserConfirmation("  [REQ-1.1] Monitor CPU utilization?")
+		config.RequestRateMonitoring = getUserConfirmation("  [REQ-1.2] Monitor incoming request rate?")
 
-	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	fmt.Println("SCALING METRICS (What triggers scaling)")
-	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	config.CPUMonitoring = getUserConfirmation("  [REQ-1.1] Monitor CPU utilization?")
-	config.RequestRateMonitoring = getUserConfirmation("  [REQ-1.2] Monitor incoming request rate?")
+		fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		fmt.Println("SCALING BEHAVIOR (How scaling happens)")
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		config.ImmediateScaling = true
 
-	fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	fmt.Println("SCALING BEHAVIOR (How scaling happens)")
-	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	config.ImmediateScaling = true
-	// config.ScaleUpTimeWindow = getUserConfirmation("    [REQ-1.3] Scale-up requires 2 min above 70%?")
-	// config.ScaleDownTimeWindow = getUserConfirmation("    [REQ-1.4] Scale-down requires 5 min below 30%?")
+		fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		fmt.Println("INSTANCE LIMITS & SAFETY")
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-	fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	fmt.Println("INSTANCE LIMITS & SAFETY")
-	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	// config.EnforceMinInstances = getUserConfirmation("  [REQ-1.5] Enforce minimum 2 instances?")
-	// config.EnforceMaxInstances = getUserConfirmation("  [REQ-1.6] Enforce maximum 10 instances?")
-	// config.EnforceCooldown = getUserConfirmation("  [REQ-1.7] Enforce 3-minute cooldown between scaling?")
+		fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		fmt.Println("HEALTH & RELIABILITY")
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-	fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	fmt.Println("HEALTH & RELIABILITY")
-	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	config.AutoReplaceUnhealthy = getUserConfirmation("  [REQ-5.3] Auto-replace unhealthy instances after repeated health check failures?")
-	// if config.HealthChecks {
-	// 	config.HealthCheckRecovery = getUserConfirmation("    [REQ-5.3] Terminate unhealthy instances?")
-	// 	config.HealthCheckLogging = getUserConfirmation("    [REQ-5.4] Log health check failures?")
-	// }
+		fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		fmt.Println("SERVICE DISCOVERY & LOAD BALANCING")
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		config.ServiceDiscovery = getUserConfirmation("  [REQ-2.x] Enable service discovery & registration?")
+		config.LoadBalancing = getUserConfirmation("  [REQ-3.x] Enable load balancing (round-robin)?")
+		if config.LoadBalancing {
+			config.StickySessionsLB = getUserConfirmation("    [REQ-3.6] Enable sticky sessions (optional)?")
+		}
 
-	fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	fmt.Println("SERVICE DISCOVERY & LOAD BALANCING")
-	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	config.ServiceDiscovery = getUserConfirmation("  [REQ-2.x] Enable service discovery & registration?")
-	config.LoadBalancing = getUserConfirmation("  [REQ-3.x] Enable load balancing (round-robin)?")
-	if config.LoadBalancing {
-		config.StickySessionsLB = getUserConfirmation("    [REQ-3.6] Enable sticky sessions (optional)?")
+		fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		fmt.Println("METRICS & OBSERVABILITY")
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+		fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+		fmt.Println("SECURITY (Advanced)")
+		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
 	}
-
-	fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	fmt.Println("METRICS & OBSERVABILITY")
-	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	// config.PrometheusMetrics = getUserConfirmation("  [REQ-6.1] Export metrics in Prometheus format?")
-	// if config.PrometheusMetrics {
-	// 	config.MetricsRetention = getUserConfirmation("    [REQ-6.3] Retain metrics for 7 days?")
-	// }
-	// config.ScalingLogging = getUserConfirmation("  [REQ-6.4] Log all scaling events?")
-
-	fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	fmt.Println("SECURITY (Advanced)")
-	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-	// config.TLSCommunication = getUserConfirmation("  [SEC-1] Use TLS for service-to-service communication?")
-	// config.EncryptedState = getUserConfirmation("  [SEC-4] Encrypt Terraform state at rest?")
 
 	displayScalingConfiguration(config)
 	return config
 }
 
 func getUserConfirmation(prompt string) bool {
-	if autoYes {
-		fmt.Println(prompt + " (y/n): y")
-		return true
-	}
 	for {
 		fmt.Print(prompt + " (y/n): ")
 		var response string
@@ -715,6 +938,35 @@ func getUserConfirmation(prompt string) bool {
 	}
 }
 
+func displayScalingConfiguration(config ScalingConfig) {
+	fmt.Println("\n╔════════════════════════════════════════════════════════════════════╗")
+	fmt.Println("║     YOUR SCALING CONFIGURATION                                    ║")
+	fmt.Println("╚════════════════════════════════════════════════════════════════════╝\n")
+	fmt.Println("  METRICS:")
+	fmt.Printf("    [%s] CPU Monitoring\n", map[bool]string{true: "✓", false: "✗"}[config.CPUMonitoring])
+	fmt.Printf("    [%s] Request Rate Monitoring\n", map[bool]string{true: "✓", false: "✗"}[config.RequestRateMonitoring])
+
+	fmt.Println("\n  SERVICE DISCOVERY & LB:")
+	fmt.Printf("    [%s] Service Discovery\n", map[bool]string{true: "✓", false: "✗"}[config.ServiceDiscovery])
+	fmt.Printf("    [%s] Load Balancing\n", map[bool]string{true: "✓", false: "✗"}[config.LoadBalancing])
+	fmt.Printf("    [%s] Sticky Sessions\n", map[bool]string{true: "✓", false: "✗"}[config.StickySessionsLB])
+
+	fmt.Println()
+
+	saveScalingConfigToFile(config)
+}
+
+func saveScalingConfigToFile(config ScalingConfig) {
+	configJSON, _ := json.MarshalIndent(config, "", "  ")
+	err := ioutil.WriteFile("scaling_config.json", configJSON, 0644)
+	if err != nil {
+		log.Printf("Warning: Could not save scaling config to file: %v", err)
+	} else {
+		fmt.Println("✓ Configuration saved to: scaling_config.json")
+		fmt.Println()
+	}
+}
+
 func initTerraform() {
 	fmt.Println("=== Initializing Terraform ===")
 	initCmd := exec.Command("terraform", "init")
@@ -726,99 +978,58 @@ func initTerraform() {
 	fmt.Println("=== Terraform Initialization Complete ===")
 }
 
-func loadEnvFile() {
-	data, err := ioutil.ReadFile(".env")
-	if err != nil {
-		log.Fatalf("Failed to read .env file: %v", err)
-	}
-
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-
-		key := strings.TrimSpace(parts[0])
-		value := strings.TrimSpace(parts[1])
-
-		if err := os.Setenv(key, value); err != nil {
-			log.Printf("Warning: Failed to set environment variable %s: %v", key, err)
-		}
-	}
-
-	fmt.Println("AWS credentials loaded from .env file")
-}
-
-func displayScalingConfiguration(config ScalingConfig) {
-	fmt.Println("\n╔════════════════════════════════════════════════════════════════════╗")
-	fmt.Println("║     YOUR SCALING CONFIGURATION                                    ║")
-	fmt.Println("╚════════════════════════════════════════════════════════════════════╝\n")
-	fmt.Println("  METRICS:")
-	fmt.Printf("    [%s] CPU Monitoring\n", map[bool]string{true: "YES", false: "NO"}[config.CPUMonitoring])
-	fmt.Printf("    [%s] Request Rate Monitoring\n", map[bool]string{true: "YES", false: "NO"}[config.RequestRateMonitoring])
-	// fmt.Println("\n  SCALING BEHAVIOR:")
-	// fmt.Printf("    [%s] Immediate Scaling\n", map[bool]string{true: "YES", false: "NO"}[config.ImmediateScaling])
-	// fmt.Printf("    [%s] 2-Min Scale-Up Window\n", map[bool]string{true: "YES", false: "NO"}[config.ScaleUpTimeWindow])
-	// fmt.Printf("    [%s] 5-Min Scale-Down Window\n", map[bool]string{true: "YES", false: "NO"}[config.ScaleDownTimeWindow])
-	// fmt.Println("\n  LIMITS & SAFETY:")
-	// fmt.Printf("    [%s] Enforce Min 2 Instances\n", map[bool]string{true: "YES", false: "NO"}[config.EnforceMinInstances])
-	// fmt.Printf("    [%s] Enforce Max 10 Instances\n", map[bool]string{true: "YES", false: "NO"}[config.EnforceMaxInstances])
-	// fmt.Printf("    [%s] 3-Min Cooldown Period\n", map[bool]string{true: "YES", false: "NO"}[config.EnforceCooldown])
-	// fmt.Println("\n  HEALTH & RELIABILITY:")
-	// fmt.Printf("    [%s] Health Checks\n", map[bool]string{true: "YES", false: "NO"}[config.HealthChecks])
-	// fmt.Printf("    [%s] Health Check Recovery\n", map[bool]string{true: "YES", false: "NO"}[config.HealthCheckRecovery])
-	// fmt.Printf("    [%s] Health Check Logging\n", map[bool]string{true: "YES", false: "NO"}[config.HealthCheckLogging])
-	fmt.Println("\n  HEALTH & RELIABILITY:")
-	fmt.Printf("    [%s] Auto-replace unhealthy instances\n", map[bool]string{true: "YES", false: "NO"}[config.AutoReplaceUnhealthy])
-	fmt.Println("\n  SERVICE DISCOVERY & LB:")
-	fmt.Printf("    [%s] Service Discovery\n", map[bool]string{true: "YES", false: "NO"}[config.ServiceDiscovery])
-	fmt.Printf("    [%s] Load Balancing\n", map[bool]string{true: "YES", false: "NO"}[config.LoadBalancing])
-	fmt.Printf("    [%s] Sticky Sessions\n", map[bool]string{true: "YES", false: "NO"}[config.StickySessionsLB])
-	// fmt.Println("\n  OBSERVABILITY:")
-	// fmt.Printf("    [%s] Prometheus Metrics\n", map[bool]string{true: "YES", false: "NO"}[config.PrometheusMetrics])
-	// fmt.Printf("    [%s] Metrics Retention (7d)\n", map[bool]string{true: "YES", false: "NO"}[config.MetricsRetention])
-	// fmt.Printf("    [%s] Scaling Event Logging\n", map[bool]string{true: "YES", false: "NO"}[config.ScalingLogging])
-	// fmt.Println("\n  SECURITY:")
-	// fmt.Printf("    [%s] TLS Communication\n", map[bool]string{true: "YES", false: "NO"}[config.TLSCommunication])
-	// fmt.Printf("    [%s] Encrypted Terraform State\n", map[bool]string{true: "YES", false: "NO"}[config.EncryptedState])
-	fmt.Println()
-	
-	saveScalingConfigToFile(config)
-}
-
-func saveScalingConfigToFile(config ScalingConfig) {
-	configJSON, _ := json.MarshalIndent(config, "", "  ")
-	err := ioutil.WriteFile("scaling_config.json", configJSON, 0644)
-	if err != nil {
-		log.Printf("Warning: Could not save scaling config to file: %v", err)
-	} else {
-		fmt.Println("Configuration saved to: scaling_config.json")
-		fmt.Println()
-	}
-}
-
 func main() {
-	loadEnvFile()
+	setupLogging()
 
-	flag.BoolVar(&autoYes, "y", false, "Automatically answer 'yes' to all configuration questions")
-	flag.Parse()
-
-	if autoYes {
-		fmt.Println("Auto-yes mode enabled (-y flag). All prompts will be answered with 'yes'.\n")
+	skipStartupPage := false
+	if len(os.Args) > 1 && (os.Args[1] == "-y" || os.Args[1] == "--yes") {
+		skipStartupPage = true
 	}
 
-	scalingConfig := selectScalingOptions()
+	scalingConfig := selectScalingOptions(true)
+
+	var allIPs []string
+	var appIPs []string
+	var lbIP string
+
+	go startDashboard(&allIPs, &appIPs, &lbIP)
+	time.AfterFunc(1*time.Second, func() {
+		openBrowser("http://localhost:9090")
+	})
+
+	var initialInstances = 1
+	if skipStartupPage {
+		log.Println("[STARTUP] -y flag set: skipping web configuration page")
+	} else {
+		fmt.Println("=== Awaiting startup configuration at http://localhost:9090 ===")
+		cfg := <-configReceivedCh
+
+		if v, ok := cfg["initial-instances"]; ok {
+			switch n := v.(type) {
+			case float64:
+				initialInstances = int(n)
+			case int:
+				initialInstances = n
+			case string:
+				if parsed, err := strconv.Atoi(n); err == nil {
+					initialInstances = parsed
+				}
+			}
+		}
+		if initialInstances < 1 {
+			initialInstances = 1
+		}
+		log.Printf("[STARTUP] Initial instance count from config: %d", initialInstances)
+	}
+
+	systemPhase.Store(phaseProvisioning)
 
 	initTerraform()
 
 	fmt.Println("=== Running Terraform Apply ===")
-	applyCmd := exec.Command("terraform", "apply", "-auto-approve")
+	applyCmd := exec.Command("terraform", "apply",
+		"-var", fmt.Sprintf("app_instance_count=%d", initialInstances),
+		"-auto-approve", "-lock=false")
 	applyCmd.Stdout = os.Stdout
 	applyCmd.Stderr = os.Stderr
 	if err := applyCmd.Run(); err != nil {
@@ -833,7 +1044,6 @@ func main() {
 		log.Fatalf("Failed to get terraform output: %v", err)
 	}
 
-	var allIPs []string
 	if err := json.Unmarshal(outBytes, &allIPs); err != nil {
 		log.Fatalf("Failed to parse IPs from terraform output: %v", err)
 	}
@@ -844,7 +1054,6 @@ func main() {
 		log.Fatalf("Failed to get app instance IPs from terraform output: %v", err)
 	}
 
-	var appIPs []string
 	if err := json.Unmarshal(appOutBytes, &appIPs); err != nil {
 		log.Fatalf("Failed to parse app IPs from terraform output: %v", err)
 	}
@@ -854,7 +1063,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to get LB IP from terraform output: %v", err)
 	}
-	lbIP := strings.TrimSpace(string(lbIPRaw))
+	lbIP = strings.TrimSpace(string(lbIPRaw))
 
 	if len(allIPs) == 0 {
 		log.Fatal("No instance IPs found in terraform output")
@@ -867,30 +1076,16 @@ func main() {
 	fmt.Printf("Load balancer sender IP: %s\n", lbIP)
 	fmt.Printf("Scalable app IPs: %s\n", strings.Join(appIPs, ", "))
 
-	fmt.Println("\n╔════════════════════════════════════════════════════════════════════╗")
-	fmt.Println("║     LOAD BALANCER CONFIGURATION                                   ║")
-	fmt.Println("╚════════════════════════════════════════════════════════════════════╝\n")
-	fmt.Printf("✓ Load Balancer Entry Point: http://%s (port 80)\n", lbIP)
-	fmt.Println("✓ Traffic Routing: All requests routed through nginx load balancer")
-	fmt.Println("✓ Health Monitoring: Active endpoint checking on all instances")
-	fmt.Printf("✓ Auto-Replace Unhealthy: %v\n", scalingConfig.AutoReplaceUnhealthy)
-	fmt.Println("✓ Continuous Background Traffic: Enabled (baseline + on-demand)")
-	fmt.Println("✓ Failed Instance Recovery: Automatic provisioning enabled\n")
+	systemPhase.Store(phaseReady)
 
-	go startDashboard(&allIPs, &appIPs, &lbIP, scalingConfig)
-	time.AfterFunc(1*time.Second, func() {
-		openBrowser("http://localhost:9090")
-	})
-
-	// Periodically refresh IPs from terraform state so dashboard always shows current instances
 	go func() {
-		ticker := time.NewTicker(10 * time.Second)
+		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
 			allOutCmd := exec.Command("terraform", "output", "-json", "instance_ips")
 			allOutBytes, err := allOutCmd.Output()
 			if err != nil {
-				// Silently skip on error (e.g., terraform locked during apply)
+
 				continue
 			}
 			var newAllIPs []string
@@ -926,10 +1121,8 @@ func main() {
 	}()
 
 	fmt.Println("=== Starting Scaler ===")
-	// Run all Go files in current directory so scaler.go can access deploy.go functions/constants
-	args := append([]string{"run", "."}, appIPs...)
+	args := append([]string{"run", "scaler.go"}, appIPs...)
 	scalerCmd := exec.Command("go", args...)
-	scalerCmd.Env = append(os.Environ(), fmt.Sprintf("AUTO_REPLACE_UNHEALTHY=%t", scalingConfig.AutoReplaceUnhealthy))
 	scalerCmd.Stdout = os.Stdout
 	scalerCmd.Stderr = os.Stderr
 	if err := scalerCmd.Start(); err != nil {
@@ -943,101 +1136,44 @@ func main() {
 	fmt.Println("║     STARTING TEST EXECUTION                                        ║")
 	fmt.Println("╚════════════════════════════════════════════════════════════════════╝\n")
 
-	// Keeping the deploy flow CPU-only for dashboard validation.
-	// if scalingConfig.EnforceMinInstances {
-	// 	fmt.Println("[TEST] Verifying minimum 2 instances requirement...")
-	// 	fmt.Printf("  Current instances: %d (Expected: >= 2)\n", len(ips))
-	// 	if len(ips) >= 2 {
-	// 		fmt.Println("  ✓ PASS: Minimum instance requirement met\n")
-	// 	} else {
-	// 		fmt.Println("  ✗ FAIL: Minimum instance requirement NOT met\n")
-	// 	}
-	// }
-
-	// if scalingConfig.EnforceMaxInstances {
-	// 	fmt.Println("[TEST] Verifying maximum 10 instances limit...")
-	// 	fmt.Println("  This will be tested during stress test (max 10 instances allowed)\n")
-	// }
-
-	// if scalingConfig.EnforceCooldown {
-	// 	fmt.Println("[TEST] Cooldown period is configured for 3 minutes between scaling operations")
-	// 	fmt.Println("  Monitoring logs for cooldown enforcement...\n")
-	// }
-
-	// if scalingConfig.HealthChecks {
-	// 	fmt.Println("[TEST] Testing /health endpoint on each instance...")
-	// 	testHealthEndpoints(ips)
-	// 	fmt.Println()
-	// }
-
-	// if scalingConfig.PrometheusMetrics {
-	// 	fmt.Println("[TEST] Testing /metrics endpoint (Prometheus format)...")
-	// 	testMetricsEndpoints(ips)
-	// 	fmt.Println()
-	// }
-
 	fmt.Println("\n╔════════════════════════════════════════════════════════════════════╗")
-	fmt.Println("║     TESTS AVAILABLE FOR MANUAL TRIGGERING                        ║")
+	fmt.Println("║     LAUNCHING REQUIREMENT-BASED TESTS                            ║")
 	fmt.Println("╚════════════════════════════════════════════════════════════════════╝\n")
 
-	fmt.Println("[TESTS] CPU Load Test - Available at /api/test/cpu-load")
-	fmt.Println("[TESTS] Traffic Spike Test - Available at /api/test/traffic-spike")
-	fmt.Println("[TESTS] Open http://localhost:9090 to access test controls\n")
+	stressedIPs := make(map[string]bool)
+	_ = sync.WaitGroup{}
 
-	// if scalingConfig.HealthChecks && scalingConfig.HealthCheckRecovery {
-	// 	fmt.Println("[TEST GENERATOR] Health Check Test - Will monitor instance health and recovery")
-	// 	wg.Add(1)
-	// 	go func() {
-	// 		defer wg.Done()
-	// 		runHealthCheckTest(scalingConfig, getActiveIPs)
-	// 	}()
-	// }
-
-	// if scalingConfig.ScaleDownTimeWindow {
-	// 	fmt.Println("[TEST GENERATOR] Scale-Down Test - Will reduce load after grace period to trigger scale-down")
-	// 	wg.Add(1)
-	// 	go func() {
-	// 		defer wg.Done()
-	// 		runScaleDownTest(scalingConfig, getActiveIPs)
-	// 	}()
-	// }
-
-	// if scalingConfig.EnforceCooldown {
-	// 	fmt.Println("[TEST GENERATOR] Cooldown Test - Will verify 3-minute cooldown between operations")
-	// }
-
-	// if scalingConfig.PrometheusMetrics {
-	// 	fmt.Println("[TEST GENERATOR] Prometheus Metrics Test - Continuous metric validation")
-	// 	wg.Add(1)
-	// 	go func() {
-	// 		defer wg.Done()
-	// 		runMetricsValidationTest(scalingConfig, getActiveIPs)
-	// 	}()
-	// }
-
-	// Disabled: Tests now triggered manually via web UI
-	// Auto-discovery stress testing has been removed
-
-	// Keep process alive, restart scaler if it crashes
-	for {
-		fmt.Println("[SCALER] Waiting for scaler process...")
-		if err := scalerCmd.Wait(); err != nil {
-			fmt.Printf("[SCALER] Scaler exited with error: %v\n", err)
-		} else {
-			fmt.Println("[SCALER] Scaler exited normally")
-		}
-		
-		fmt.Println("[SCALER] Restarting scaler in 5 seconds...")
-		time.Sleep(5 * time.Second)
-		
-		scalerCmd = exec.Command("go", args...)
-		scalerCmd.Env = append(os.Environ(), fmt.Sprintf("AUTO_REPLACE_UNHEALTHY=%t", scalingConfig.AutoReplaceUnhealthy))
-		scalerCmd.Stdout = os.Stdout
-		scalerCmd.Stderr = os.Stderr
-		if err := scalerCmd.Start(); err != nil {
-			fmt.Printf("[SCALER] Failed to restart scaler: %v\n", err)
-		}
+	if scalingConfig.CPUMonitoring {
+		fmt.Println("[INFO] CPU monitoring enabled - scaler will react to dashboard-triggered load.")
 	}
+
+	if scalingConfig.RequestRateMonitoring {
+		fmt.Println("[INFO] Request rate monitoring enabled - scaler will react to dashboard-triggered traffic.")
+	}
+
+	fmt.Println()
+
+	go func() {
+		for {
+			currentIPs := getActiveIPs()
+			for _, ip := range currentIPs {
+				if stressedIPs[ip] {
+					continue
+				}
+				fmt.Printf("[AUTO-DISCOVER] New instance detected: %s... ", ip)
+				_, err := fetchCPU(ip)
+				if err != nil {
+					fmt.Printf("NOT READY (%v)\n", err)
+					continue
+				}
+				fmt.Println("OK")
+				stressedIPs[ip] = true
+			}
+			time.Sleep(30 * time.Second)
+		}
+	}()
+
+	scalerCmd.Wait()
 }
 
 func getActiveIPs() []string {
@@ -1159,9 +1295,9 @@ func runTrafficSpikeTest(config ScalingConfig, getLBIP func() string) {
 	time.Sleep(10 * time.Second)
 
 	phases := []struct {
-		name       string
-		maxWorkers int
-		duration   time.Duration
+		name		string
+		maxWorkers	int
+		duration	time.Duration
 	}{
 		{"Warm-up", 10, 30 * time.Second},
 		{"Ramp-up", 50, 30 * time.Second},
@@ -1404,10 +1540,10 @@ func testMetricsEndpoints(ips []string) {
 		}
 
 		metricsStr := string(body)
-		isPrometheus := strings.Contains(metricsStr, "# HELP") && 
-		              strings.Contains(metricsStr, "# TYPE") && 
-		              strings.Contains(metricsStr, "cpu_utilization")
-		
+		isPrometheus := strings.Contains(metricsStr, "# HELP") &&
+			strings.Contains(metricsStr, "# TYPE") &&
+			strings.Contains(metricsStr, "cpu_utilization")
+
 		if isPrometheus && (strings.Contains(metricsStr, "request_count") || strings.Contains(metricsStr, "requests")) {
 			fmt.Printf("✓ PASS (Prometheus format)\n")
 			passCount++

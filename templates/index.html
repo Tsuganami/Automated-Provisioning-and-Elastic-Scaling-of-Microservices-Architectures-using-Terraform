@@ -27,11 +27,7 @@
 <body class="min-h-screen px-4 py-6 text-white md:px-8">
     <div class="mx-auto max-w-6xl">
         <div class="mb-8 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
-            <div>
-                <p class="text-xs uppercase tracking-[0.35em] text-sky-300/80">Live scaling telemetry</p>
-                <h1 class="mt-2 text-3xl font-semibold md:text-5xl">Scaling Engine Dashboard</h1>
-                <p class="mt-3 max-w-2xl text-sm text-slate-300 md:text-base">Connected to the deployed instances. The dashboard refreshes live status, CPU pressure, and request totals from the running microservices.</p>
-            </div>
+            <div></div>
             <div class="rounded-2xl border border-white/10 bg-slate-950/70 px-5 py-4 shadow-2xl shadow-sky-950/30 backdrop-blur">
                 <div class="text-xs uppercase tracking-[0.3em] text-slate-400">Clock</div>
                 <div id="clock" class="mt-1 font-mono text-sm sm:text-base text-sky-200"></div>
@@ -93,7 +89,7 @@
                     <h2 class="text-lg font-semibold text-white">Test Controls</h2>
                     <p class="text-sm text-slate-400">Manually trigger stress tests to validate scaling behavior.</p>
                 </div>
-                <div class="grid gap-3 md:grid-cols-2">
+                <div class="grid gap-3 md:grid-cols-3">
                     <button
                         class="rounded-xl border border-amber-400/30 bg-amber-500/15 px-4 py-3 text-sm font-semibold text-amber-100 transition hover:bg-amber-500/25 active:bg-amber-500/35"
                         onclick="triggerCPULoadTest()"
@@ -104,7 +100,13 @@
                         class="rounded-xl border border-cyan-400/30 bg-cyan-500/15 px-4 py-3 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-500/25 active:bg-cyan-500/35"
                         onclick="triggerTrafficSpikeTest()"
                     >
-                        Start Traffic Spike Test
+                        Increase Traffic +600 req/min
+                    </button>
+                    <button
+                        class="rounded-xl border border-emerald-400/30 bg-emerald-500/15 px-4 py-3 text-sm font-semibold text-emerald-100 transition hover:bg-emerald-500/25 active:bg-emerald-500/35"
+                        onclick="triggerTrafficReduce()"
+                    >
+                        Reduce Traffic -600 req/min
                     </button>
                 </div>
                 <div id="test-status" class="text-xs text-slate-400">Tests will run in the background. Check console for detailed progress.</div>
@@ -190,11 +192,10 @@
                 const isStarting = instance.status === 'STARTING';
                 const colors = cpuClass(instance.cpu_percent || 0);
                 const width = Math.min(Math.max(instance.cpu_percent || 0, 0), 100);
-                const requestRate = Number.isFinite(instance.request_rate) ? instance.request_rate.toFixed(2) : '0.00';
-                const requestWidth = Math.min(Math.max((instance.request_rate || 0) * 5, 0), 100);
+                const requestRate = Number.isFinite(instance.request_rate) ? (instance.request_rate * 60).toFixed(0) : '0';
+                const requestWidth = Math.min(Math.max((instance.request_rate || 0) * 60 / 25, 0), 100);
                 const healthLabel = isStarting ? 'Instance starting' : (instance.healthy ? 'Healthy' : 'Attention required');
                 const buttonLabel = isStarting ? 'Instance is starting...' : 'Increase CPU Load';
-                const requestButtonLabel = isStarting ? 'Instance is starting...' : 'Increase Request Rate';
                 const failHealthButtonLabel = isStarting ? 'Instance is starting...' : 'Fail Health Check (2m)';
                 const rolePillClass = instance.role === 'LB-SENDER'
                     ? 'border-fuchsia-500/30 bg-fuchsia-500/15 text-fuchsia-100'
@@ -219,6 +220,7 @@
                                 </div>
                             </div>
 
+                            ${instance.role !== 'LB-SENDER' ? `
                             <div>
                                 <div class="mb-2 flex items-center justify-between text-sm">
                                     <span class="text-slate-400">CPU Load</span>
@@ -232,12 +234,12 @@
                             <div>
                                 <div class="mb-2 flex items-center justify-between text-sm">
                                     <span class="text-slate-400">Request Rate</span>
-                                    <span class="font-mono text-slate-100">${requestRate} req/s</span>
+                                    <span class="font-mono text-slate-100">${requestRate} req/min</span>
                                 </div>
                                 <div class="h-2 overflow-hidden rounded-full bg-white/10">
                                     <div class="h-full rounded-full bg-gradient-to-r from-cyan-500 to-blue-500" style="width: ${requestWidth}%"></div>
                                 </div>
-                            </div>
+                            </div>` : ''}
 
                             <div class="flex items-center justify-between rounded-xl border px-3 py-2 text-sm ${colors.badge}">
                                 <span>Health</span>
@@ -250,14 +252,6 @@
                                 onclick="triggerLoad('${instance.ip}')"
                             >
                                 ${buttonLabel}
-                            </button>
-
-                            <button
-                                class="w-full rounded-xl border border-cyan-400/30 bg-cyan-500/15 px-3 py-2 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-500/25 disabled:cursor-not-allowed disabled:opacity-50"
-                                ${(instance.healthy && instance.role !== 'LB-SENDER') ? '' : 'disabled'}
-                                onclick="triggerRequestLoad('${instance.ip}')"
-                            >
-                                ${requestButtonLabel}
                             </button>
 
                             <button
@@ -291,27 +285,6 @@
                 setTimeout(refreshDashboard, 1200);
             } catch (error) {
                 statusMessage.textContent = `Load trigger failed: ${error.message}`;
-                statusMessage.className = 'mb-6 rounded-2xl border border-rose-500/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-100';
-            }
-        }
-
-        async function triggerRequestLoad(ip) {
-            try {
-                const response = await fetch(`/api/request-load?ip=${encodeURIComponent(ip)}`, {
-                    method: 'POST'
-                });
-
-                if (!response.ok) {
-                    const message = await response.text();
-                    throw new Error(message || 'Failed to trigger request load');
-                }
-
-                const result = await response.json();
-                statusMessage.textContent = `Request load increased on ${result.ip}: +${result.added_rps} req/s (current target: ${result.current_rps} req/s).`;
-                statusMessage.className = 'mb-6 rounded-2xl border border-cyan-500/30 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-100';
-                setTimeout(refreshDashboard, 1200);
-            } catch (error) {
-                statusMessage.textContent = `Request burst failed: ${error.message}`;
                 statusMessage.className = 'mb-6 rounded-2xl border border-rose-500/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-100';
             }
         }
@@ -355,7 +328,7 @@
                 document.getElementById('instance-count').textContent = summaryData.instance_count ?? 0;
                 document.getElementById('healthy-count').textContent = summaryData.healthy_count ?? 0;
                 document.getElementById('average-cpu').textContent = `${Number(summaryData.average_cpu || 0).toFixed(1)}%`;
-                document.getElementById('request-rate').textContent = `${Number(summaryData.request_rate || 0).toFixed(2)} req/s`;
+                document.getElementById('request-rate').textContent = `${Number((summaryData.request_rate || 0) * 60).toFixed(0)} req/min`;
                 statusMessage.textContent = `Live data refreshed at ${new Date().toLocaleTimeString()}`;
                 statusMessage.className = 'mb-6 rounded-2xl border border-emerald-500/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100';
             } catch (error) {
@@ -394,15 +367,36 @@
 
                 if (!response.ok) {
                     const message = await response.text();
-                    throw new Error(message || 'Failed to start Traffic Spike Test');
+                    throw new Error(message || 'Failed to increase traffic');
                 }
 
                 const result = await response.json();
                 statusMessage.textContent = `${result.message}`;
                 statusMessage.className = 'mb-6 rounded-2xl border border-cyan-500/30 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-100';
-                document.getElementById('test-status').textContent = `Last test: Traffic Spike Test started at ${new Date().toLocaleTimeString()}`;
+                document.getElementById('test-status').textContent = `Sustained load: ${result.current_rpm} req/min (last change at ${new Date().toLocaleTimeString()})`;
             } catch (error) {
-                statusMessage.textContent = `Failed to start Traffic Spike Test: ${error.message}`;
+                statusMessage.textContent = `Failed to increase traffic: ${error.message}`;
+                statusMessage.className = 'mb-6 rounded-2xl border border-rose-500/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-100';
+            }
+        }
+
+        async function triggerTrafficReduce() {
+            try {
+                const response = await fetch('/api/test/traffic-reduce', {
+                    method: 'POST'
+                });
+
+                if (!response.ok) {
+                    const message = await response.text();
+                    throw new Error(message || 'Failed to reduce traffic');
+                }
+
+                const result = await response.json();
+                statusMessage.textContent = `${result.message}`;
+                statusMessage.className = 'mb-6 rounded-2xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100';
+                document.getElementById('test-status').textContent = `Sustained load: ${result.current_rpm} req/min (last change at ${new Date().toLocaleTimeString()})`;
+            } catch (error) {
+                statusMessage.textContent = `Failed to reduce traffic: ${error.message}`;
                 statusMessage.className = 'mb-6 rounded-2xl border border-rose-500/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-100';
             }
         }

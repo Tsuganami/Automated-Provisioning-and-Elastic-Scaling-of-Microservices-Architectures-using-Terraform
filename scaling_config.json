@@ -1,7 +1,6 @@
 {
   "CPUMonitoring": true,
   "RequestRateMonitoring": true,
-  "AutoReplaceUnhealthy": true,
   "ImmediateScaling": true,
   "ScaleUpTimeWindow": false,
   "ScaleDownTimeWindow": false,

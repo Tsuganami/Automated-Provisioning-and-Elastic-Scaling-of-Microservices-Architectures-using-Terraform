@@ -340,25 +340,36 @@
         }
 
         // Launch the dashboard
-        function launchDashboard() {
+        async function launchDashboard() {
             if (!validateConfiguration()) {
                 return;
             }
 
-            saveConfiguration();
-            
+            const config = saveConfiguration();
+
             const statusMsg = document.getElementById('status-message');
             statusMsg.classList.remove('hidden');
-            statusMsg.textContent = 'Configuration saved. Starting system...';
+            statusMsg.textContent = 'Submitting configuration...';
 
-            // Simulate system startup delay
-            setTimeout(() => {
-                // Send configuration to backend/save to environment
-                console.log('Configuration:', localStorage.getItem('apsConfig'));
-                
-                // Redirect to main dashboard
-                window.location.href = '/';
-            }, 1500);
+            try {
+                const response = await fetch('/api/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(config)
+                });
+                if (!response.ok) {
+                    const text = await response.text();
+                    throw new Error(text || ('HTTP ' + response.status));
+                }
+                statusMsg.textContent = 'Configuration accepted. Provisioning infrastructure...';
+                // Redirect to "/" - the backend will serve the provisioning
+                // spinner page now (phase=1) which polls /api/ready and
+                // forwards to the real dashboard once ready.
+                setTimeout(() => { window.location.href = '/'; }, 600);
+            } catch (err) {
+                statusMsg.textContent = 'Failed to submit configuration: ' + err.message;
+                statusMsg.className = 'rounded-lg border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200';
+            }
         }
 
         // Initialize on page load

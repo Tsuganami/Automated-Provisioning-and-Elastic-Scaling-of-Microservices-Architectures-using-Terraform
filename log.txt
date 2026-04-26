@@ -1,0 +1,797 @@
+=== Logging session output to log.txt (2026-04-26T23:06:01Z) ===
+
+╔════════════════════════════════════════════════════════════════════╗
+║     YOUR SCALING CONFIGURATION                                    ║
+╚════════════════════════════════════════════════════════════════════╝
+
+  METRICS:
+    [✓] CPU Monitoring
+    [✓] Request Rate Monitoring
+
+  SERVICE DISCOVERY & LB:
+    [✓] Service Discovery
+    [✓] Load Balancing
+    [✓] Sticky Sessions
+
+✓ Configuration saved to: scaling_config.json
+
+=== Awaiting startup configuration at http://localhost:9090 ===
+=== Dashboard running at http://localhost:9090 ===
+2026/04/26 23:06:06 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:06:11 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:06:16 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:06:18 [STARTUP] User configuration received - beginning provisioning
+2026/04/26 23:06:18 [STARTUP] Initial instance count from config: 1
+=== Initializing Terraform ===
+[0m[1mInitializing the backend...[0m
+2026/04/26 23:06:21 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:06:26 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:06:31 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:06:36 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:06:41 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:06:46 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:06:51 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+[0m[1mInitializing provider plugins...[0m
+- Reusing previous version of hashicorp/aws from the dependency lock file
+2026/04/26 23:06:56 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:07:01 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:07:06 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:07:11 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:07:16 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:07:21 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+- Using previously-installed hashicorp/aws v6.42.0
+
+[0m[1m[32mTerraform has been successfully initialized![0m[32m[0m
+[0m[32m
+You may now begin working with Terraform. Try running "terraform plan" to see
+any changes that are required for your infrastructure. All Terraform commands
+should now work.
+
+If you ever set or change modules or backend configuration for Terraform,
+rerun this command to reinitialize your working directory. If you forget, other
+commands will detect it and remind you to do so if necessary.[0m
+=== Terraform Initialization Complete ===
+=== Running Terraform Apply ===
+2026/04/26 23:07:26 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:07:31 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:07:36 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:07:41 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:07:46 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:07:51 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:07:56 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:08:01 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:08:06 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:08:11 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+[0m[1mdata.aws_vpc.default: Reading...[0m[0m
+[0m[1mdata.aws_caller_identity.current: Reading...[0m[0m
+[0m[1mdata.aws_caller_identity.current: Read complete after 0s [id=593710895467][0m
+[0m[1mdata.aws_vpc.default: Read complete after 1s [id=vpc-0b32161f4b9956c22][0m
+[0m[1maws_security_group.aps_lb_sg: Refreshing state... [id=sg-09cb3c7141c2b9ab9][0m
+[0m[1maws_security_group.aps_app_sg: Refreshing state... [id=sg-0cd23d5b30f69bf4e][0m
+[0m[1maws_instance.app_server[1]: Refreshing state... [id=i-0be542e1d545fd8e1][0m
+[0m[1maws_instance.app_server[2]: Refreshing state... [id=i-0cdf9b350f3b6fe6e][0m
+[0m[1maws_instance.app_server[0]: Refreshing state... [id=i-043ed8ad07869ec3f][0m
+2026/04/26 23:08:16 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+[0m[1maws_instance.lb_sender: Refreshing state... [id=i-0122e1ec6b1fb5738][0m
+
+Terraform used the selected providers to generate the following execution
+plan. Resource actions are indicated with the following symbols:
+  [31m-[0m destroy[0m
+
+Terraform will perform the following actions:
+
+[1m  # aws_instance.app_server[1][0m will be [1m[31mdestroyed[0m
+  # (because index [1] is out of range for count)
+[0m  [31m-[0m[0m resource "aws_instance" "app_server" {
+      [31m-[0m[0m ami                                  = "ami-0c7217cdde317cfec" [90m-> null[0m[0m
+      [31m-[0m[0m arn                                  = "arn:aws:ec2:us-east-1:593710895467:instance/i-0be542e1d545fd8e1" [90m-> null[0m[0m
+      [31m-[0m[0m associate_public_ip_address          = true [90m-> null[0m[0m
+      [31m-[0m[0m availability_zone                    = "us-east-1b" [90m-> null[0m[0m
+      [31m-[0m[0m disable_api_stop                     = false [90m-> null[0m[0m
+      [31m-[0m[0m disable_api_termination              = false [90m-> null[0m[0m
+      [31m-[0m[0m ebs_optimized                        = false [90m-> null[0m[0m
+      [31m-[0m[0m force_destroy                        = false [90m-> null[0m[0m
+      [31m-[0m[0m get_password_data                    = false [90m-> null[0m[0m
+      [31m-[0m[0m hibernation                          = false [90m-> null[0m[0m
+      [31m-[0m[0m id                                   = "i-0be542e1d545fd8e1" [90m-> null[0m[0m
+      [31m-[0m[0m instance_initiated_shutdown_behavior = "stop" [90m-> null[0m[0m
+      [31m-[0m[0m instance_state                       = "running" [90m-> null[0m[0m
+      [31m-[0m[0m instance_type                        = "t3.micro" [90m-> null[0m[0m
+      [31m-[0m[0m ipv6_address_count                   = 0 [90m-> null[0m[0m
+      [31m-[0m[0m ipv6_addresses                       = [] [90m-> null[0m[0m
+      [31m-[0m[0m monitoring                           = false [90m-> null[0m[0m
+      [31m-[0m[0m placement_partition_number           = 0 [90m-> null[0m[0m
+      [31m-[0m[0m primary_network_interface_id         = "eni-040f395ba1f621ec6" [90m-> null[0m[0m
+      [31m-[0m[0m private_dns                          = "ip-172-31-47-169.ec2.internal" [90m-> null[0m[0m
+      [31m-[0m[0m private_ip                           = "172.31.47.169" [90m-> null[0m[0m
+      [31m-[0m[0m public_dns                           = "ec2-52-205-210-118.compute-1.amazonaws.com" [90m-> null[0m[0m
+      [31m-[0m[0m public_ip                            = "52.205.210.118" [90m-> null[0m[0m
+      [31m-[0m[0m region                               = "us-east-1" [90m-> null[0m[0m
+      [31m-[0m[0m secondary_private_ips                = [] [90m-> null[0m[0m
+      [31m-[0m[0m security_groups                      = [
+          [31m-[0m[0m "aps-app-sg-v2",
+        ] [90m-> null[0m[0m
+      [31m-[0m[0m source_dest_check                    = true [90m-> null[0m[0m
+      [31m-[0m[0m subnet_id                            = "subnet-0c2131c4391d9a1e8" [90m-> null[0m[0m
+      [31m-[0m[0m tags                                 = {
+          [31m-[0m[0m "Name"    = "APS-App-1"
+          [31m-[0m[0m "Project" = "Diploma"
+          [31m-[0m[0m "Role"    = "app"
+        } [90m-> null[0m[0m
+      [31m-[0m[0m tags_all                             = {
+          [31m-[0m[0m "Name"    = "APS-App-1"
+          [31m-[0m[0m "Project" = "Diploma"
+          [31m-[0m[0m "Role"    = "app"
+        } [90m-> null[0m[0m
+      [31m-[0m[0m tenancy                              = "default" [90m-> null[0m[0m
+      [31m-[0m[0m user_data                            = <<-EOT
+            #!/bin/bash
+            sudo apt-get update
+            sudo apt-get install -y golang-go
+            
+            cat << 'GOEOF' > /home/ubuntu/main.go
+            package main
+            
+            import (
+                    "fmt"
+                    "net/http"
+                    "os"
+                    "runtime"
+                    "strconv"
+                    "strings"
+                    "sync"
+                    "time"
+            )
+            
+            var requestCounter = 0
+            var counterMutex = &sync.Mutex{}
+            var spikeActive = false
+            var spikeMutex = &sync.Mutex{}
+            
+            func incrementRequestCounter() {
+                    counterMutex.Lock()
+                    requestCounter++
+                    counterMutex.Unlock()
+            }
+            
+            func burnCPU(d time.Duration) {
+                    done := make(chan int)
+                    for i := 0; i < runtime.NumCPU(); i++ {
+                            go func() {
+                                    for {
+                                            select {
+                                            case <-done:
+                                                    return
+                                            default:
+                                            }
+                                    }
+                            }()
+                    }
+                    time.Sleep(d)
+                    close(done)
+            }
+            
+            func workHandler(w http.ResponseWriter, r *http.Request) {
+                    incrementRequestCounter()
+                    burnCPU(30 * time.Second)
+                    fmt.Fprintf(w, "Work finished on %s", os.Getenv("HOSTNAME"))
+            }
+            
+            func requestHandler(w http.ResponseWriter, r *http.Request) {
+                    incrementRequestCounter()
+                    w.WriteHeader(http.StatusOK)
+                    fmt.Fprint(w, "request accepted")
+            }
+            
+            // /spike triggers a sustained CPU spike that makes /health time out
+            // (single-threaded http server saturated by busy goroutines).
+            func spikeHandler(w http.ResponseWriter, r *http.Request) {
+                    spikeMutex.Lock()
+                    if spikeActive {
+                            spikeMutex.Unlock()
+                            fmt.Fprint(w, "spike already active")
+                            return
+                    }
+                    spikeActive = true
+                    spikeMutex.Unlock()
+            
+                    fmt.Fprintf(w, "spike started on %s", os.Getenv("HOSTNAME"))
+            
+                    go func() {
+                            // Far more goroutines than cores -> health checks start failing.
+                            workers := runtime.NumCPU() * 8
+                            done := make(chan int)
+                            for i := 0; i < workers; i++ {
+                                    go func() {
+                                            for {
+                                                    select {
+                                                    case <-done:
+                                                            return
+                                                    default:
+                                                    }
+                                            }
+                                    }()
+                            }
+                            time.Sleep(5 * time.Minute)
+                            close(done)
+                            spikeMutex.Lock()
+                            spikeActive = false
+                            spikeMutex.Unlock()
+                    }()
+            }
+            
+            func networkBytes() float64 {
+                    data, err := os.ReadFile("/proc/net/dev")
+                    if err != nil {
+                            return 0
+                    }
+                    total := 0.0
+                    for _, line := range strings.Split(string(data), "\n") {
+                            line = strings.TrimSpace(line)
+                            if !strings.Contains(line, ":") {
+                                    continue
+                            }
+                            parts := strings.Fields(line)
+                            if len(parts) < 10 {
+                                    continue
+                            }
+                            iface := strings.TrimSuffix(parts[0], ":")
+                            if iface == "lo" {
+                                    continue
+                            }
+                            rx, _ := strconv.ParseFloat(parts[1], 64)
+                            tx, _ := strconv.ParseFloat(parts[9], 64)
+                            total += rx + tx
+                    }
+                    return total
+            }
+            
+            func metricsHandler(w http.ResponseWriter, r *http.Request) {
+                    counterMutex.Lock()
+                    requests := requestCounter
+                    counterMutex.Unlock()
+            
+                    data, _ := os.ReadFile("/proc/loadavg")
+                    parts := strings.Split(string(data), " ")
+                    load, _ := strconv.ParseFloat(parts[0], 64)
+                    cpuPercent := (load / float64(runtime.NumCPU())) * 100
+            
+                    netBytes := networkBytes()
+            
+                    w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+                    fmt.Fprintf(w, "# HELP cpu_utilization CPU utilization percentage\n")
+                    fmt.Fprintf(w, "# TYPE cpu_utilization gauge\n")
+                    fmt.Fprintf(w, "cpu_utilization %.2f\n", cpuPercent)
+                    fmt.Fprintf(w, "# HELP request_count Total number of requests processed\n")
+                    fmt.Fprintf(w, "# TYPE request_count counter\n")
+                    fmt.Fprintf(w, "request_count %d\n", requests)
+                    fmt.Fprintf(w, "# HELP network_bytes_total Total bytes in+out across non-loopback interfaces\n")
+                    fmt.Fprintf(w, "# TYPE network_bytes_total counter\n")
+                    fmt.Fprintf(w, "network_bytes_total %.0f\n", netBytes)
+            }
+            
+            func healthHandler(w http.ResponseWriter, r *http.Request) {
+                    w.Header().Set("Content-Type", "application/json")
+                    w.WriteHeader(http.StatusOK)
+                    fmt.Fprintf(w, "{\"status\":\"healthy\",\"hostname\":\"%s\"}", os.Getenv("HOSTNAME"))
+            }
+            
+            func main() {
+                    http.HandleFunc("/work", workHandler)
+                    http.HandleFunc("/request", requestHandler)
+                    http.HandleFunc("/spike", spikeHandler)
+                    http.HandleFunc("/metrics", metricsHandler)
+                    http.HandleFunc("/health", healthHandler)
+                    http.ListenAndServe(":8080", nil)
+            }
+            GOEOF
+            
+            cat << 'SVCEOF' > /etc/systemd/system/goapp.service
+            [Unit]
+            Description=Go Metrics App
+            After=network.target
+            
+            [Service]
+            ExecStart=/usr/bin/go run /home/ubuntu/main.go
+            Restart=always
+            RestartSec=5
+            Environment=HOME=/home/ubuntu
+            
+            [Install]
+            WantedBy=multi-user.target
+            SVCEOF
+            
+            systemctl daemon-reload
+            systemctl enable goapp.service
+            systemctl start goapp.service
+        EOT [90m-> null[0m[0m
+      [31m-[0m[0m user_data_replace_on_change          = false [90m-> null[0m[0m
+      [31m-[0m[0m vpc_security_group_ids               = [
+          [31m-[0m[0m "sg-0cd23d5b30f69bf4e",
+        ] [90m-> null[0m[0m
+        [90m# (9 unchanged attributes hidden)[0m[0m
+
+      [31m-[0m[0m capacity_reservation_specification {
+          [31m-[0m[0m capacity_reservation_preference = "open" [90m-> null[0m[0m
+        }
+
+      [31m-[0m[0m cpu_options {
+          [31m-[0m[0m core_count            = 1 [90m-> null[0m[0m
+          [31m-[0m[0m threads_per_core      = 2 [90m-> null[0m[0m
+            [90m# (2 unchanged attributes hidden)[0m[0m
+        }
+
+      [31m-[0m[0m credit_specification {
+          [31m-[0m[0m cpu_credits = "unlimited" [90m-> null[0m[0m
+        }
+
+      [31m-[0m[0m enclave_options {
+          [31m-[0m[0m enabled = false [90m-> null[0m[0m
+        }
+
+      [31m-[0m[0m maintenance_options {
+          [31m-[0m[0m auto_recovery = "default" [90m-> null[0m[0m
+        }
+
+      [31m-[0m[0m metadata_options {
+          [31m-[0m[0m http_endpoint               = "enabled" [90m-> null[0m[0m
+          [31m-[0m[0m http_protocol_ipv6          = "disabled" [90m-> null[0m[0m
+          [31m-[0m[0m http_put_response_hop_limit = 1 [90m-> null[0m[0m
+          [31m-[0m[0m http_tokens                 = "optional" [90m-> null[0m[0m
+          [31m-[0m[0m instance_metadata_tags      = "disabled" [90m-> null[0m[0m
+        }
+
+      [31m-[0m[0m primary_network_interface {
+          [31m-[0m[0m delete_on_termination = true [90m-> null[0m[0m
+          [31m-[0m[0m network_interface_id  = "eni-040f395ba1f621ec6" [90m-> null[0m[0m
+        }
+
+      [31m-[0m[0m private_dns_name_options {
+          [31m-[0m[0m enable_resource_name_dns_a_record    = false [90m-> null[0m[0m
+          [31m-[0m[0m enable_resource_name_dns_aaaa_record = false [90m-> null[0m[0m
+          [31m-[0m[0m hostname_type                        = "ip-name" [90m-> null[0m[0m
+        }
+
+      [31m-[0m[0m root_block_device {
+          [31m-[0m[0m delete_on_termination = true [90m-> null[0m[0m
+          [31m-[0m[0m device_name           = "/dev/sda1" [90m-> null[0m[0m
+          [31m-[0m[0m encrypted             = false [90m-> null[0m[0m
+          [31m-[0m[0m iops                  = 100 [90m-> null[0m[0m
+          [31m-[0m[0m tags                  = {} [90m-> null[0m[0m
+          [31m-[0m[0m tags_all              = {} [90m-> null[0m[0m
+          [31m-[0m[0m throughput            = 0 [90m-> null[0m[0m
+          [31m-[0m[0m volume_id             = "vol-04c89cead3e5d14c0" [90m-> null[0m[0m
+          [31m-[0m[0m volume_size           = 8 [90m-> null[0m[0m
+          [31m-[0m[0m volume_type           = "gp2" [90m-> null[0m[0m
+            [90m# (1 unchanged attribute hidden)[0m[0m
+        }
+    }
+
+[1m  # aws_instance.app_server[2][0m will be [1m[31mdestroyed[0m
+  # (because index [2] is out of range for count)
+[0m  [31m-[0m[0m resource "aws_instance" "app_server" {
+      [31m-[0m[0m ami                                  = "ami-0c7217cdde317cfec" [90m-> null[0m[0m
+      [31m-[0m[0m arn                                  = "arn:aws:ec2:us-east-1:593710895467:instance/i-0cdf9b350f3b6fe6e" [90m-> null[0m[0m
+      [31m-[0m[0m associate_public_ip_address          = true [90m-> null[0m[0m
+      [31m-[0m[0m availability_zone                    = "us-east-1b" [90m-> null[0m[0m
+      [31m-[0m[0m disable_api_stop                     = false [90m-> null[0m[0m
+      [31m-[0m[0m disable_api_termination              = false [90m-> null[0m[0m
+      [31m-[0m[0m ebs_optimized                        = false [90m-> null[0m[0m
+      [31m-[0m[0m force_destroy                        = false [90m-> null[0m[0m
+      [31m-[0m[0m get_password_data                    = false [90m-> null[0m[0m
+      [31m-[0m[0m hibernation                          = false [90m-> null[0m[0m
+      [31m-[0m[0m id                                   = "i-0cdf9b350f3b6fe6e" [90m-> null[0m[0m
+      [31m-[0m[0m instance_initiated_shutdown_behavior = "stop" [90m-> null[0m[0m
+      [31m-[0m[0m instance_state                       = "running" [90m-> null[0m[0m
+      [31m-[0m[0m instance_type                        = "t3.micro" [90m-> null[0m[0m
+      [31m-[0m[0m ipv6_address_count                   = 0 [90m-> null[0m[0m
+      [31m-[0m[0m ipv6_addresses                       = [] [90m-> null[0m[0m
+      [31m-[0m[0m monitoring                           = false [90m-> null[0m[0m
+      [31m-[0m[0m placement_partition_number           = 0 [90m-> null[0m[0m
+      [31m-[0m[0m primary_network_interface_id         = "eni-0aba4d893434cb51d" [90m-> null[0m[0m
+      [31m-[0m[0m private_dns                          = "ip-172-31-41-161.ec2.internal" [90m-> null[0m[0m
+      [31m-[0m[0m private_ip                           = "172.31.41.161" [90m-> null[0m[0m
+      [31m-[0m[0m public_dns                           = "ec2-54-164-200-52.compute-1.amazonaws.com" [90m-> null[0m[0m
+      [31m-[0m[0m public_ip                            = "54.164.200.52" [90m-> null[0m[0m
+      [31m-[0m[0m region                               = "us-east-1" [90m-> null[0m[0m
+      [31m-[0m[0m secondary_private_ips                = [] [90m-> null[0m[0m
+      [31m-[0m[0m security_groups                      = [
+          [31m-[0m[0m "aps-app-sg-v2",
+        ] [90m-> null[0m[0m
+      [31m-[0m[0m source_dest_check                    = true [90m-> null[0m[0m
+      [31m-[0m[0m subnet_id                            = "subnet-0c2131c4391d9a1e8" [90m-> null[0m[0m
+      [31m-[0m[0m tags                                 = {
+          [31m-[0m[0m "Name"    = "APS-App-2"
+          [31m-[0m[0m "Project" = "Diploma"
+          [31m-[0m[0m "Role"    = "app"
+        } [90m-> null[0m[0m
+      [31m-[0m[0m tags_all                             = {
+          [31m-[0m[0m "Name"    = "APS-App-2"
+          [31m-[0m[0m "Project" = "Diploma"
+          [31m-[0m[0m "Role"    = "app"
+        } [90m-> null[0m[0m
+      [31m-[0m[0m tenancy                              = "default" [90m-> null[0m[0m
+      [31m-[0m[0m user_data                            = <<-EOT
+            #!/bin/bash
+            sudo apt-get update
+            sudo apt-get install -y golang-go
+            
+            cat << 'GOEOF' > /home/ubuntu/main.go
+            package main
+            
+            import (
+                    "fmt"
+                    "net/http"
+                    "os"
+                    "runtime"
+                    "strconv"
+                    "strings"
+                    "sync"
+                    "time"
+            )
+            
+            var requestCounter = 0
+            var counterMutex = &sync.Mutex{}
+            var spikeActive = false
+            var spikeMutex = &sync.Mutex{}
+            
+            func incrementRequestCounter() {
+                    counterMutex.Lock()
+                    requestCounter++
+                    counterMutex.Unlock()
+            }
+            
+            func burnCPU(d time.Duration) {
+                    done := make(chan int)
+                    for i := 0; i < runtime.NumCPU(); i++ {
+                            go func() {
+                                    for {
+                                            select {
+                                            case <-done:
+                                                    return
+                                            default:
+                                            }
+                                    }
+                            }()
+                    }
+                    time.Sleep(d)
+                    close(done)
+            }
+            
+            func workHandler(w http.ResponseWriter, r *http.Request) {
+                    incrementRequestCounter()
+                    burnCPU(30 * time.Second)
+                    fmt.Fprintf(w, "Work finished on %s", os.Getenv("HOSTNAME"))
+            }
+            
+            func requestHandler(w http.ResponseWriter, r *http.Request) {
+                    incrementRequestCounter()
+                    w.WriteHeader(http.StatusOK)
+                    fmt.Fprint(w, "request accepted")
+            }
+            
+            // /spike triggers a sustained CPU spike that makes /health time out
+            // (single-threaded http server saturated by busy goroutines).
+            func spikeHandler(w http.ResponseWriter, r *http.Request) {
+                    spikeMutex.Lock()
+                    if spikeActive {
+                            spikeMutex.Unlock()
+                            fmt.Fprint(w, "spike already active")
+                            return
+                    }
+                    spikeActive = true
+                    spikeMutex.Unlock()
+            
+                    fmt.Fprintf(w, "spike started on %s", os.Getenv("HOSTNAME"))
+            
+                    go func() {
+                            // Far more goroutines than cores -> health checks start failing.
+                            workers := runtime.NumCPU() * 8
+                            done := make(chan int)
+                            for i := 0; i < workers; i++ {
+                                    go func() {
+                                            for {
+                                                    select {
+                                                    case <-done:
+                                                            return
+                                                    default:
+                                                    }
+                                            }
+                                    }()
+                            }
+                            time.Sleep(5 * time.Minute)
+                            close(done)
+                            spikeMutex.Lock()
+                            spikeActive = false
+                            spikeMutex.Unlock()
+                    }()
+            }
+            
+            func networkBytes() float64 {
+                    data, err := os.ReadFile("/proc/net/dev")
+                    if err != nil {
+                            return 0
+                    }
+                    total := 0.0
+                    for _, line := range strings.Split(string(data), "\n") {
+                            line = strings.TrimSpace(line)
+                            if !strings.Contains(line, ":") {
+                                    continue
+                            }
+                            parts := strings.Fields(line)
+                            if len(parts) < 10 {
+                                    continue
+                            }
+                            iface := strings.TrimSuffix(parts[0], ":")
+                            if iface == "lo" {
+                                    continue
+                            }
+                            rx, _ := strconv.ParseFloat(parts[1], 64)
+                            tx, _ := strconv.ParseFloat(parts[9], 64)
+                            total += rx + tx
+                    }
+                    return total
+            }
+            
+            func metricsHandler(w http.ResponseWriter, r *http.Request) {
+                    counterMutex.Lock()
+                    requests := requestCounter
+                    counterMutex.Unlock()
+            
+                    data, _ := os.ReadFile("/proc/loadavg")
+                    parts := strings.Split(string(data), " ")
+                    load, _ := strconv.ParseFloat(parts[0], 64)
+                    cpuPercent := (load / float64(runtime.NumCPU())) * 100
+            
+                    netBytes := networkBytes()
+            
+                    w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+                    fmt.Fprintf(w, "# HELP cpu_utilization CPU utilization percentage\n")
+                    fmt.Fprintf(w, "# TYPE cpu_utilization gauge\n")
+                    fmt.Fprintf(w, "cpu_utilization %.2f\n", cpuPercent)
+                    fmt.Fprintf(w, "# HELP request_count Total number of requests processed\n")
+                    fmt.Fprintf(w, "# TYPE request_count counter\n")
+                    fmt.Fprintf(w, "request_count %d\n", requests)
+                    fmt.Fprintf(w, "# HELP network_bytes_total Total bytes in+out across non-loopback interfaces\n")
+                    fmt.Fprintf(w, "# TYPE network_bytes_total counter\n")
+                    fmt.Fprintf(w, "network_bytes_total %.0f\n", netBytes)
+            }
+            
+            func healthHandler(w http.ResponseWriter, r *http.Request) {
+                    w.Header().Set("Content-Type", "application/json")
+                    w.WriteHeader(http.StatusOK)
+                    fmt.Fprintf(w, "{\"status\":\"healthy\",\"hostname\":\"%s\"}", os.Getenv("HOSTNAME"))
+            }
+            
+            func main() {
+                    http.HandleFunc("/work", workHandler)
+                    http.HandleFunc("/request", requestHandler)
+                    http.HandleFunc("/spike", spikeHandler)
+                    http.HandleFunc("/metrics", metricsHandler)
+                    http.HandleFunc("/health", healthHandler)
+                    http.ListenAndServe(":8080", nil)
+            }
+            GOEOF
+            
+            cat << 'SVCEOF' > /etc/systemd/system/goapp.service
+            [Unit]
+            Description=Go Metrics App
+            After=network.target
+            
+            [Service]
+            ExecStart=/usr/bin/go run /home/ubuntu/main.go
+            Restart=always
+            RestartSec=5
+            Environment=HOME=/home/ubuntu
+            
+            [Install]
+            WantedBy=multi-user.target
+            SVCEOF
+            
+            systemctl daemon-reload
+            systemctl enable goapp.service
+            systemctl start goapp.service
+        EOT [90m-> null[0m[0m
+      [31m-[0m[0m user_data_replace_on_change          = false [90m-> null[0m[0m
+      [31m-[0m[0m vpc_security_group_ids               = [
+          [31m-[0m[0m "sg-0cd23d5b30f69bf4e",
+        ] [90m-> null[0m[0m
+        [90m# (9 unchanged attributes hidden)[0m[0m
+
+      [31m-[0m[0m capacity_reservation_specification {
+          [31m-[0m[0m capacity_reservation_preference = "open" [90m-> null[0m[0m
+        }
+
+      [31m-[0m[0m cpu_options {
+          [31m-[0m[0m core_count            = 1 [90m-> null[0m[0m
+          [31m-[0m[0m threads_per_core      = 2 [90m-> null[0m[0m
+            [90m# (2 unchanged attributes hidden)[0m[0m
+        }
+
+      [31m-[0m[0m credit_specification {
+          [31m-[0m[0m cpu_credits = "unlimited" [90m-> null[0m[0m
+        }
+
+      [31m-[0m[0m enclave_options {
+          [31m-[0m[0m enabled = false [90m-> null[0m[0m
+        }
+
+      [31m-[0m[0m maintenance_options {
+          [31m-[0m[0m auto_recovery = "default" [90m-> null[0m[0m
+        }
+
+      [31m-[0m[0m metadata_options {
+          [31m-[0m[0m http_endpoint               = "enabled" [90m-> null[0m[0m
+          [31m-[0m[0m http_protocol_ipv6          = "disabled" [90m-> null[0m[0m
+          [31m-[0m[0m http_put_response_hop_limit = 1 [90m-> null[0m[0m
+          [31m-[0m[0m http_tokens                 = "optional" [90m-> null[0m[0m
+          [31m-[0m[0m instance_metadata_tags      = "disabled" [90m-> null[0m[0m
+        }
+
+      [31m-[0m[0m primary_network_interface {
+          [31m-[0m[0m delete_on_termination = true [90m-> null[0m[0m
+          [31m-[0m[0m network_interface_id  = "eni-0aba4d893434cb51d" [90m-> null[0m[0m
+        }
+
+      [31m-[0m[0m private_dns_name_options {
+          [31m-[0m[0m enable_resource_name_dns_a_record    = false [90m-> null[0m[0m
+          [31m-[0m[0m enable_resource_name_dns_aaaa_record = false [90m-> null[0m[0m
+          [31m-[0m[0m hostname_type                        = "ip-name" [90m-> null[0m[0m
+        }
+
+      [31m-[0m[0m root_block_device {
+          [31m-[0m[0m delete_on_termination = true [90m-> null[0m[0m
+          [31m-[0m[0m device_name           = "/dev/sda1" [90m-> null[0m[0m
+          [31m-[0m[0m encrypted             = false [90m-> null[0m[0m
+          [31m-[0m[0m iops                  = 100 [90m-> null[0m[0m
+          [31m-[0m[0m tags                  = {} [90m-> null[0m[0m
+          [31m-[0m[0m tags_all              = {} [90m-> null[0m[0m
+          [31m-[0m[0m throughput            = 0 [90m-> null[0m[0m
+          [31m-[0m[0m volume_id             = "vol-0f326ec11b920411f" [90m-> null[0m[0m
+          [31m-[0m[0m volume_size           = 8 [90m-> null[0m[0m
+          [31m-[0m[0m volume_type           = "gp2" [90m-> null[0m[0m
+            [90m# (1 unchanged attribute hidden)[0m[0m
+        }
+    }
+
+[1mPlan:[0m [0m0 to add, 0 to change, 2 to destroy.
+
+Changes to Outputs:
+  [33m~[0m[0m app_instance_ips         = [
+        "54.196.132.81",
+      [31m-[0m[0m "52.205.210.118",
+      [31m-[0m[0m "54.164.200.52",
+    ]
+  [33m~[0m[0m app_instance_private_ips = [
+        "172.31.33.144",
+      [31m-[0m[0m "172.31.47.169",
+      [31m-[0m[0m "172.31.41.161",
+    ]
+  [33m~[0m[0m instance_ips             = [
+        [90m# (1 unchanged element hidden)[0m[0m
+        "54.196.132.81",
+      [31m-[0m[0m "52.205.210.118",
+      [31m-[0m[0m "54.164.200.52",
+    ]
+2026/04/26 23:08:21 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+[0m[1maws_instance.app_server[1]: Destroying... [id=i-0be542e1d545fd8e1][0m[0m
+[0m[1maws_instance.app_server[2]: Destroying... [id=i-0cdf9b350f3b6fe6e][0m[0m
+2026/04/26 23:08:26 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:08:31 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+[0m[1maws_instance.app_server[2]: Still destroying... [id=i-0cdf9b350f3b6fe6e, 00m10s elapsed][0m[0m
+[0m[1maws_instance.app_server[1]: Still destroying... [id=i-0be542e1d545fd8e1, 00m10s elapsed][0m[0m
+2026/04/26 23:08:36 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:08:41 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+[0m[1maws_instance.app_server[2]: Still destroying... [id=i-0cdf9b350f3b6fe6e, 00m20s elapsed][0m[0m
+[0m[1maws_instance.app_server[1]: Still destroying... [id=i-0be542e1d545fd8e1, 00m20s elapsed][0m[0m
+2026/04/26 23:08:46 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:08:51 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+[0m[1maws_instance.app_server[1]: Still destroying... [id=i-0be542e1d545fd8e1, 00m30s elapsed][0m[0m
+[0m[1maws_instance.app_server[2]: Still destroying... [id=i-0cdf9b350f3b6fe6e, 00m30s elapsed][0m[0m
+[0m[1maws_instance.app_server[2]: Destruction complete after 31s[0m
+[0m[1maws_instance.app_server[1]: Destruction complete after 31s[0m
+[0m[1m[32m
+Apply complete! Resources: 0 added, 0 changed, 2 destroyed.[0m
+[0m[1m[32m
+Outputs:
+
+[0mapp_instance_ips = [
+  "54.196.132.81",
+]
+app_instance_private_ips = [
+  "172.31.33.144",
+]
+instance_ips = [
+  "100.24.65.11",
+  "54.196.132.81",
+]
+lb_ip = "100.24.65.11"
+=== Terraform Apply Complete ===
+=== Fetching Instance IPs ===
+2026/04/26 23:08:56 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:09:01 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:09:06 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:09:11 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:09:16 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:09:21 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:09:26 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:09:31 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:09:36 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:09:41 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:09:46 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:09:51 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:09:56 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:10:01 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:10:06 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:10:11 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:10:16 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:10:21 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:10:26 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:10:31 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+2026/04/26 23:10:36 [TRAFFIC STATUS] Sustained load: 0 req/min -> (LB pending)
+Found IPs: 100.24.65.11, 54.196.132.81
+Load balancer sender IP: 100.24.65.11
+Scalable app IPs: 54.196.132.81
+=== Starting Scaler ===
+=== Waiting 2 minutes for instances to boot and initialize ===
+Initial instance count: 1
+2026/04/26 23:10:41 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+2026/04/26 23:10:46 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+2026/04/26 23:10:51 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+2026/04/26 23:10:56 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+2026/04/26 23:11:01 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+=== METRICS [23:11:04] CPU=0.0% TotalRPS=0.0 Instances=1 ===
+2026/04/26 23:11:06 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+2026/04/26 23:11:11 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+2026/04/26 23:11:16 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+2026/04/26 23:11:21 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+2026/04/26 23:11:26 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+2026/04/26 23:11:29 [LB-INIT] Initial backend list pushed (1 backend(s))
+2026/04/26 23:11:31 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+2026/04/26 23:11:36 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+=== METRICS [23:11:41] CPU=0.0% TotalRPS=0.0 Instances=1 ===
+2026/04/26 23:11:41 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+2026/04/26 23:11:46 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+2026/04/26 23:11:51 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+2026/04/26 23:11:56 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+2026/04/26 23:12:01 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+2026/04/26 23:12:06 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+2026/04/26 23:12:11 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+=== METRICS [23:12:15] CPU=0.0% TotalRPS=0.0 Instances=1 ===
+2026/04/26 23:12:16 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+2026/04/26 23:12:21 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+2026/04/26 23:12:26 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+2026/04/26 23:12:31 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+2026/04/26 23:12:36 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+
+╔════════════════════════════════════════════════════════════════════╗
+║     STARTING TEST EXECUTION                                        ║
+╚════════════════════════════════════════════════════════════════════╝
+
+
+╔════════════════════════════════════════════════════════════════════╗
+║     LAUNCHING REQUIREMENT-BASED TESTS                            ║
+╚════════════════════════════════════════════════════════════════════╝
+
+[INFO] CPU monitoring enabled - scaler will react to dashboard-triggered load.
+[INFO] Request rate monitoring enabled - scaler will react to dashboard-triggered traffic.
+
+2026/04/26 23:12:41 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+2026/04/26 23:12:46 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+=== METRICS [23:12:49] CPU=0.0% TotalRPS=0.0 Instances=1 ===
+2026/04/26 23:12:51 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+2026/04/26 23:12:56 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+[AUTO-DISCOVER] New instance detected: 54.196.132.81... OK
+2026/04/26 23:13:01 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+2026/04/26 23:13:06 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+2026/04/26 23:13:11 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+2026/04/26 23:13:16 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+2026/04/26 23:13:21 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+=== METRICS [23:13:25] CPU=0.0% TotalRPS=0.0 Instances=1 ===
+2026/04/26 23:13:26 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+2026/04/26 23:13:31 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+2026/04/26 23:13:36 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+2026/04/26 23:13:41 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+2026/04/26 23:13:46 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+2026/04/26 23:13:51 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11
+2026/04/26 23:13:56 [TRAFFIC STATUS] Sustained load: 0 req/min -> 100.24.65.11

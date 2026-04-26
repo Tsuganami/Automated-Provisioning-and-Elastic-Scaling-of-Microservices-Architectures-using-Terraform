@@ -1,0 +1,17 @@
+services:
+  terraform-tools:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tf-go-env
+    volumes:
+      - .:/app
+    tty: true
+    env_file: ".env"
+    stdin_open: true
+    environment:
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+    ports:
+      - 9090:9090
+
