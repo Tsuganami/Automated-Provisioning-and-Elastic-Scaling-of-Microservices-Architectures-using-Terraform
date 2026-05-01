@@ -2,16 +2,7 @@ data "aws_vpc" "default" {
   default = true
 }
 
-# NOTE: We intentionally do NOT reuse pre-existing security groups via
-# `data "aws_security_groups"` anymore. Reusing an old SG that was created
-# before port 9999 (lb_control.py) was added causes the dashboard's
-# notifyLB() POSTs to be silently dropped at the SG, which in turn means
-# newly-scaled instances are never registered with nginx and traffic isn't
-# diverted.
-#
-# The SG names are bumped to "-v2" so a fresh group is provisioned cleanly.
-# Any leftover "aps-microservice-sg" / "aps-app-sg" from a previous deployment
-# can be deleted manually in the AWS console; nothing else references them.
+
 
 resource "aws_security_group" "aps_lb_sg" {
   name        = "aps-microservice-sg-v2"

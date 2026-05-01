@@ -1,3 +1,5 @@
+//go:build scaler
+
 package main
 
 import (
@@ -11,44 +13,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
-)
-
-const (
-	ThresholdUp			= 50.0
-	ThresholdDown			= 25.0
-	MinInstances			= 1
-	MaxInstances			= 3
-	Cooldown			= 30 * time.Second
-	MonitoringInterval		= 10 * time.Second
-	ScaleUpTimeWindow		= 15 * time.Second
-	ScaleDownTimeWindow		= 60 * time.Second
-	RequestRateThresholdUp		= 40.0
-	RequestRateThresholdDown	= 20.0
-	HealthCheckInterval		= 10 * time.Second
-
-	UnhealthyCPUThreshold	= 60.0
-
-	UnhealthyChecksRequired	= 3
-
-	HealReadinessTimeout	= 5 * time.Minute
-
-	HealReadinessPollInterval	= 5 * time.Second
-
-	HealDrainGracePeriod	= 5 * time.Second
-)
-
-var (
-	currentInstances	= 1
-	lastScalingTime		= time.Now().Add(-Cooldown)
-	previousRequestCounts	= make(map[string]float64)
-	thresholdExceededTime	time.Time
-	thresholdDroppedTime	time.Time
-	highCPUSamples		= make(map[string]int)
-	tfMu			sync.Mutex
-	replacingMu		sync.Mutex
-	replacing		= make(map[string]bool)
 )
 
 func getAverageCPU(ips []string) (float64, error) {
@@ -111,8 +76,12 @@ func getTotalRequestRate(ips []string) (float64, error) {
 				break
 			}
 		}
+		now := time.Now()
 		if previous, exists := previousRequestCounts[ip]; exists {
-			elapsed := MonitoringInterval.Seconds()
+			elapsed := now.Sub(previousRequestSampleAt[ip]).Seconds()
+			if elapsed < 1 {
+				elapsed = MonitoringInterval.Seconds()
+			}
 			delta := requestCount - previous
 			if delta < 0 {
 				delta = 0
@@ -120,6 +89,7 @@ func getTotalRequestRate(ips []string) (float64, error) {
 			totalRate += delta / elapsed
 		}
 		previousRequestCounts[ip] = requestCount
+		previousRequestSampleAt[ip] = now
 		successCount++
 	}
 	if successCount == 0 {
@@ -276,6 +246,7 @@ func replaceInstance(badIP string) {
 		}
 		highCPUSamples[badIP] = 0
 		delete(previousRequestCounts, badIP)
+		delete(previousRequestSampleAt, badIP)
 		lastScalingTime = time.Now()
 		log.Printf("[SELF-HEAL] In-place replacement complete.")
 		go notifyLB()
@@ -339,6 +310,7 @@ func replaceInstance(badIP string) {
 	}
 	highCPUSamples[badIP] = 0
 	delete(previousRequestCounts, badIP)
+	delete(previousRequestSampleAt, badIP)
 	lastScalingTime = time.Now()
 
 	log.Printf("[SELF-HEAL] Heal complete. Final instance count: %d", currentInstances)
@@ -470,6 +442,8 @@ func main() {
 		log.Fatal("Usage: scaler <ip1> <ip2> ...")
 	}
 
+	loadUserConfigFromDisk()
+
 	currentInstances = len(os.Args[1:])
 	fmt.Printf("Initial instance count: %d\n", currentInstances)
 
@@ -529,8 +503,8 @@ func main() {
 			if alreadyReplacing {
 				w.Header().Set("Content-Type", "application/json")
 				json.NewEncoder(w).Encode(map[string]interface{}{
-					"status":	"already_replacing",
-					"ip":		ip,
+					"status": "already_replacing",
+					"ip":     ip,
 				})
 				return
 			}
@@ -549,9 +523,9 @@ func main() {
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"status":	"replacing",
-				"ip":		ip,
-				"drained":	len(drained),
+				"status":  "replacing",
+				"ip":      ip,
+				"drained": len(drained),
 			})
 		})
 		if err := http.ListenAndServe("127.0.0.1:9091", mux); err != nil {
@@ -638,8 +612,12 @@ func main() {
 			thresholdExceededTime = time.Time{}
 		}
 
-		scaleDown := avgCPU < ThresholdDown || perInstanceRate < RequestRateThresholdDown
-		if scaleDown && currentInstances > MinInstances {
+		cpuOK := ThresholdDown < 0 || avgCPU < ThresholdDown
+		scaleDown := cpuOK && perInstanceRate < RequestRateThresholdDown
+
+		inCooldown := time.Since(lastScalingTime) < Cooldown
+
+		if scaleDown && currentInstances > MinInstances && !inCooldown {
 			if thresholdDroppedTime.IsZero() {
 				thresholdDroppedTime = time.Now()
 				log.Printf("[SCALE-DOWN] Below threshold - waiting %v", ScaleDownTimeWindow)

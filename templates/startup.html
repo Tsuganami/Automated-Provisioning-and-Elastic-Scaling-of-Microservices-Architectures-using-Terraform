@@ -146,7 +146,8 @@
 
                     <div>
                         <label class="block text-sm font-medium text-slate-300 mb-2">CPU Scale-Down Threshold (%)</label>
-                        <input type="number" id="cpu-threshold-down" value="30" min="1" max="99" class="w-full rounded-lg border border-slate-600 bg-slate-900 px-4 py-2 text-white focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500/50">
+                        <input type="number" id="cpu-threshold-down" value="-1" min="-1" max="99" class="w-full rounded-lg border border-slate-600 bg-slate-900 px-4 py-2 text-white focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500/50">
+                        <p class="mt-1 text-xs text-slate-400">Set to <code>-1</code> to disable CPU-based scale-down (request rate still triggers it).</p>
                         <p class="mt-1 text-xs text-slate-400">Scale down when CPU drops below this percentage</p>
                     </div>
 

@@ -1,3 +1,5 @@
+//go:build !scaler
+
 package main
 
 import (
@@ -21,16 +23,23 @@ import (
 const instanceStartupGracePeriod = 4 * time.Minute
 
 const (
-	phaseAwaitingConfig	int32	= 0
-	phaseProvisioning	int32	= 1
-	phaseReady		int32	= 2
+	workBurnDuration    = 30 * time.Second
+	spikeDuration       = 5 * time.Minute
+	cpuLoadTestDuration = 3 * time.Minute
+	healthFailDuration  = 2 * time.Minute
+)
+
+const (
+	phaseAwaitingConfig int32 = 0
+	phaseProvisioning   int32 = 1
+	phaseReady          int32 = 2
 )
 
 var (
-	systemPhase		atomic.Int32
-	configReceivedCh	= make(chan map[string]interface{}, 1)
-	userConfigMu		sync.RWMutex
-	userConfig		map[string]interface{}
+	systemPhase      atomic.Int32
+	configReceivedCh = make(chan map[string]interface{}, 1)
+	userConfigMu     sync.RWMutex
+	userConfig       map[string]interface{}
 )
 
 const provisioningPageHTML = `<!DOCTYPE html>
@@ -242,15 +251,16 @@ func checkLBHealth(ip string) error {
 }
 
 type instanceStatus struct {
-	IP			string	`json:"ip"`
-	Role			string	`json:"role"`
-	CPUPercent		float64	`json:"cpu_percent"`
-	RequestCount		float64	`json:"request_count"`
-	RequestRate		float64	`json:"request_rate"`
-	NetworkThroughput	float64	`json:"network_throughput"`
-	Status			string	`json:"status"`
-	Healthy			bool	`json:"healthy"`
-	Error			string	`json:"error,omitempty"`
+	IP                string  `json:"ip"`
+	Role              string  `json:"role"`
+	CPUPercent        float64 `json:"cpu_percent"`
+	RequestCount      float64 `json:"request_count"`
+	RequestRate       float64 `json:"request_rate"`
+	NetworkThroughput float64 `json:"network_throughput"`
+	Status            string  `json:"status"`
+	Healthy           bool    `json:"healthy"`
+	StartedAt         string  `json:"started_at,omitempty"`
+	Error             string  `json:"error,omitempty"`
 }
 
 func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string) {
@@ -274,9 +284,9 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string) {
 
 	go func() {
 		transport := &http.Transport{
-			MaxIdleConns:		200,
-			MaxIdleConnsPerHost:	200,
-			IdleConnTimeout:	30 * time.Second,
+			MaxIdleConns:        200,
+			MaxIdleConnsPerHost: 200,
+			IdleConnTimeout:     30 * time.Second,
 		}
 		client := &http.Client{Timeout: 5 * time.Second, Transport: transport}
 		ticker := time.NewTicker(50 * time.Millisecond)
@@ -334,6 +344,10 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string) {
 	}()
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+
+		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Expires", "0")
 		switch systemPhase.Load() {
 		case phaseAwaitingConfig:
 			http.ServeFile(w, r, "templates/startup.html")
@@ -367,6 +381,8 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string) {
 			_ = ioutil.WriteFile("user_config.json", data, 0644)
 		}
 
+		applyUserConfig(cfg)
+
 		select {
 		case configReceivedCh <- cfg:
 		default:
@@ -380,8 +396,8 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string) {
 		w.Header().Set("Content-Type", "application/json")
 		phase := systemPhase.Load()
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"phase":	phase,
-			"ready":	phase == phaseReady,
+			"phase": phase,
+			"ready": phase == phaseReady,
 		})
 	})
 
@@ -401,8 +417,8 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string) {
 		log.Printf("[INSTANCE REMOVED] %s marked as destroying - hidden from dashboard", ip)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":	"ok",
-			"ip":		ip,
+			"status": "ok",
+			"ip":     ip,
 		})
 	})
 
@@ -428,10 +444,11 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string) {
 				role = "LB-SENDER"
 			}
 			status := instanceStatus{
-				IP:		ip,
-				Role:		role,
-				Healthy:	true,
-				Status:		"ACTIVE",
+				IP:        ip,
+				Role:      role,
+				Healthy:   true,
+				Status:    "ACTIVE",
+				StartedAt: seenAt.UTC().Format(time.RFC3339),
 			}
 			if role == "LB-SENDER" {
 				if err := checkLBHealth(ip); err != nil {
@@ -570,12 +587,12 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string) {
 		requestRateMu.Unlock()
 
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"instance_count":	visibleCount,
-			"healthy_count":	healthyCount,
-			"unhealthy_count":	unhealthyCount,
-			"average_cpu":		averageCPU,
-			"total_requests":	totalRequests,
-			"request_rate":		requestRate,
+			"instance_count":  visibleCount,
+			"healthy_count":   healthyCount,
+			"unhealthy_count": unhealthyCount,
+			"average_cpu":     averageCPU,
+			"total_requests":  totalRequests,
+			"request_rate":    requestRate,
 		})
 	})
 
@@ -608,9 +625,9 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string) {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":	"accepted",
-			"lb_ip":	targetLB,
-			"requests":	burst,
+			"status":   "accepted",
+			"lb_ip":    targetLB,
+			"requests": burst,
 		})
 	})
 
@@ -662,9 +679,9 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string) {
 		log.Printf("[FAIL-HEALTH] %s marked for replacement (traffic rerouted)", targetIP)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":	"replacing",
-			"ip":		targetIP,
-			"seconds":	seconds,
+			"status":  "replacing",
+			"ip":      targetIP,
+			"seconds": seconds,
 		})
 	})
 
@@ -688,10 +705,10 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string) {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":	"accepted",
-			"lb_ip":	targetLB,
-			"added_rps":	increaseByRPS,
-			"current_rps":	currentRPS,
+			"status":      "accepted",
+			"lb_ip":       targetLB,
+			"added_rps":   increaseByRPS,
+			"current_rps": currentRPS,
 		})
 	})
 
@@ -731,8 +748,8 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string) {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":	"accepted",
-			"ip":		targetIP,
+			"status": "accepted",
+			"ip":     targetIP,
 		})
 	})
 
@@ -758,11 +775,11 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string) {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":	"accepted",
-			"lb_ip":	targetLB,
-			"added_rpm":	600,
-			"current_rpm":	currentRPM,
-			"message":	fmt.Sprintf("Sustained traffic increased by 600 req/min. Current load: %d req/min through LB %s.", currentRPM, targetLB),
+			"status":      "accepted",
+			"lb_ip":       targetLB,
+			"added_rpm":   600,
+			"current_rpm": currentRPM,
+			"message":     fmt.Sprintf("Sustained traffic increased by 600 req/min. Current load: %d req/min through LB %s.", currentRPM, targetLB),
 		})
 	})
 
@@ -787,11 +804,11 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string) {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":	"accepted",
-			"lb_ip":	targetLB,
-			"removed_rpm":	600,
-			"current_rpm":	currentRPM,
-			"message":	fmt.Sprintf("Sustained traffic reduced by 600 req/min. Current load: %d req/min.", currentRPM),
+			"status":      "accepted",
+			"lb_ip":       targetLB,
+			"removed_rpm": 600,
+			"current_rpm": currentRPM,
+			"message":     fmt.Sprintf("Sustained traffic reduced by 600 req/min. Current load: %d req/min.", currentRPM),
 		})
 	})
 
@@ -809,7 +826,7 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string) {
 		go func(lb string) {
 			log.Printf("[CPU LOAD TEST] Sending /work bursts via LB %s", lb)
 			client := &http.Client{Timeout: 35 * time.Second}
-			deadline := time.Now().Add(3 * time.Minute)
+			deadline := time.Now().Add(cpuLoadTestDuration)
 			for time.Now().Before(deadline) {
 				for i := 0; i < 20; i++ {
 					go func() {
@@ -826,9 +843,19 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string) {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":	"accepted",
-			"lb_ip":	targetLB,
-			"message":	fmt.Sprintf("CPU load test started via load balancer %s (3 minutes of /work bursts).", targetLB),
+			"status":  "accepted",
+			"lb_ip":   targetLB,
+			"message": fmt.Sprintf("CPU load test started via load balancer %s (%s of /work bursts).", targetLB, cpuLoadTestDuration),
+		})
+	})
+
+	http.HandleFunc("/api/test/durations", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"work_burn_seconds":   int(workBurnDuration.Seconds()),
+			"spike_seconds":       int(spikeDuration.Seconds()),
+			"cpu_load_seconds":    int(cpuLoadTestDuration.Seconds()),
+			"health_fail_seconds": int(healthFailDuration.Seconds()),
 		})
 	})
 
@@ -839,32 +866,32 @@ func startDashboard(allIPs *[]string, appIPs *[]string, lbIP *string) {
 }
 
 type ScalingConfig struct {
-	CPUMonitoring		bool
-	RequestRateMonitoring	bool
+	CPUMonitoring         bool
+	RequestRateMonitoring bool
 
-	ImmediateScaling	bool
-	ScaleUpTimeWindow	bool
-	ScaleDownTimeWindow	bool
+	ImmediateScaling    bool
+	ScaleUpTimeWindow   bool
+	ScaleDownTimeWindow bool
 
-	EnforceMinInstances	bool
-	EnforceMaxInstances	bool
+	EnforceMinInstances bool
+	EnforceMaxInstances bool
 
-	EnforceCooldown	bool
+	EnforceCooldown bool
 
-	HealthChecks		bool
-	HealthCheckRecovery	bool
+	HealthChecks        bool
+	HealthCheckRecovery bool
 
-	ServiceDiscovery	bool
-	LoadBalancing		bool
-	StickySessionsLB	bool
+	ServiceDiscovery bool
+	LoadBalancing    bool
+	StickySessionsLB bool
 
-	PrometheusMetrics	bool
-	MetricsRetention	bool
-	HealthCheckLogging	bool
-	ScalingLogging		bool
+	PrometheusMetrics  bool
+	MetricsRetention   bool
+	HealthCheckLogging bool
+	ScalingLogging     bool
 
-	TLSCommunication	bool
-	EncryptedState		bool
+	TLSCommunication bool
+	EncryptedState   bool
 }
 
 func selectScalingOptions(yes bool) ScalingConfig {
@@ -879,7 +906,7 @@ func selectScalingOptions(yes bool) ScalingConfig {
 	} else {
 		fmt.Println("\n╔════════════════════════════════════════════════════════════════════╗")
 		fmt.Println("║     CONFIGURE SCALING OPTIONS FOR THIS TEST                        ║")
-		fmt.Println("╚════════════════════════════════════════════════════════════════════╝\n")
+		fmt.Println("╚════════════════════════════════════════════════════════════════════╝")
 
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		fmt.Println("SCALING METRICS (What triggers scaling)")
@@ -941,7 +968,7 @@ func getUserConfirmation(prompt string) bool {
 func displayScalingConfiguration(config ScalingConfig) {
 	fmt.Println("\n╔════════════════════════════════════════════════════════════════════╗")
 	fmt.Println("║     YOUR SCALING CONFIGURATION                                    ║")
-	fmt.Println("╚════════════════════════════════════════════════════════════════════╝\n")
+	fmt.Println("╚════════════════════════════════════════════════════════════════════╝")
 	fmt.Println("  METRICS:")
 	fmt.Printf("    [%s] CPU Monitoring\n", map[bool]string{true: "✓", false: "✗"}[config.CPUMonitoring])
 	fmt.Printf("    [%s] Request Rate Monitoring\n", map[bool]string{true: "✓", false: "✗"}[config.RequestRateMonitoring])
@@ -1121,8 +1148,18 @@ func main() {
 	}()
 
 	fmt.Println("=== Starting Scaler ===")
-	args := append([]string{"run", "scaler.go"}, appIPs...)
-	scalerCmd := exec.Command("go", args...)
+
+	scalerBin := "scaler.exe"
+	if runtime.GOOS != "windows" {
+		scalerBin = "./scaler"
+	}
+	buildCmd := exec.Command("go", "build", "-tags=scaler", "-o", scalerBin, ".")
+	buildCmd.Stdout = os.Stdout
+	buildCmd.Stderr = os.Stderr
+	if err := buildCmd.Run(); err != nil {
+		log.Fatalf("Failed to build scaler: %v", err)
+	}
+	scalerCmd := exec.Command(scalerBin, appIPs...)
 	scalerCmd.Stdout = os.Stdout
 	scalerCmd.Stderr = os.Stderr
 	if err := scalerCmd.Start(); err != nil {
@@ -1134,11 +1171,11 @@ func main() {
 
 	fmt.Println("\n╔════════════════════════════════════════════════════════════════════╗")
 	fmt.Println("║     STARTING TEST EXECUTION                                        ║")
-	fmt.Println("╚════════════════════════════════════════════════════════════════════╝\n")
+	fmt.Println("╚════════════════════════════════════════════════════════════════════╝")
 
 	fmt.Println("\n╔════════════════════════════════════════════════════════════════════╗")
 	fmt.Println("║     LAUNCHING REQUIREMENT-BASED TESTS                            ║")
-	fmt.Println("╚════════════════════════════════════════════════════════════════════╝\n")
+	fmt.Println("╚════════════════════════════════════════════════════════════════════╝")
 
 	stressedIPs := make(map[string]bool)
 	_ = sync.WaitGroup{}
@@ -1245,7 +1282,7 @@ func runCPULoadTest(config ScalingConfig, getActiveIPs func() []string) {
 	fmt.Println("  Phase 1: Ramp-up (60 seconds) - Generate moderate CPU load")
 	fmt.Println("  Phase 2: Peak (60 seconds) - Generate heavy CPU load to exceed 70% threshold")
 	fmt.Println("  Phase 3: Cooldown (60 seconds) - Reduce load gradually")
-	fmt.Println("  Expected: Scale-up after Phase 2 completes (waiting for 2-minute window)\n")
+	fmt.Println("  Expected: Scale-up after Phase 2 completes (waiting for 2-minute window)")
 
 	startTime := time.Now()
 	phaseDuration := 60 * time.Second
@@ -1282,7 +1319,7 @@ func runCPULoadTest(config ScalingConfig, getActiveIPs func() []string) {
 
 	totalTime := time.Since(startTime)
 	fmt.Printf("[CPU LOAD TEST] Complete - Total time: %v\n", totalTime)
-	fmt.Println("[CPU LOAD TEST] Check scaler logs to verify scale-up was triggered\n")
+	fmt.Println("[CPU LOAD TEST] Check scaler logs to verify scale-up was triggered")
 }
 
 func runTrafficSpikeTest(config ScalingConfig, getLBIP func() string) {
@@ -1290,14 +1327,14 @@ func runTrafficSpikeTest(config ScalingConfig, getLBIP func() string) {
 	fmt.Println("  Phase 1: Warm-up (30 seconds) - 100 req/s")
 	fmt.Println("  Phase 2: Ramp-up (30 seconds) - 500 req/s")
 	fmt.Println("  Phase 3: SPIKE (60 seconds) - 1500 req/s (exceeds 20 req/s threshold)")
-	fmt.Println("  Expected: Scale-up after Phase 3 completes (waiting for 2-minute window)\n")
+	fmt.Println("  Expected: Scale-up after Phase 3 completes (waiting for 2-minute window)")
 
 	time.Sleep(10 * time.Second)
 
 	phases := []struct {
-		name		string
-		maxWorkers	int
-		duration	time.Duration
+		name       string
+		maxWorkers int
+		duration   time.Duration
 	}{
 		{"Warm-up", 10, 30 * time.Second},
 		{"Ramp-up", 50, 30 * time.Second},
@@ -1327,13 +1364,13 @@ func runTrafficSpikeTest(config ScalingConfig, getLBIP func() string) {
 	}
 
 	fmt.Println("\n[TRAFFIC SPIKE TEST] Complete")
-	fmt.Println("[TRAFFIC SPIKE TEST] Check ./metrics or scaler logs to verify request rate was captured\n")
+	fmt.Println("[TRAFFIC SPIKE TEST] Check ./metrics or scaler logs to verify request rate was captured")
 }
 
 func runHealthCheckTest(config ScalingConfig, getActiveIPs func() []string) {
 	fmt.Println("\n[HEALTH CHECK TEST] Starting health check validation...")
 	fmt.Println("  Will continuously verify /health endpoints")
-	fmt.Println("  Monitors: Response time, status codes, failure tracking\n")
+	fmt.Println("  Monitors: Response time, status codes, failure tracking")
 
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
@@ -1383,14 +1420,14 @@ func runHealthCheckTest(config ScalingConfig, getActiveIPs func() []string) {
 func runScaleDownTest(config ScalingConfig, getActiveIPs func() []string) {
 	fmt.Println("\n[SCALE-DOWN TEST] Starting scale-down validation...")
 	fmt.Println("  Will maintain minimal load for 5+ minutes")
-	fmt.Println("  Expected: System should scale-down after 5-minute low-load window\n")
+	fmt.Println("  Expected: System should scale-down after 5-minute low-load window")
 
 	time.Sleep(4 * time.Minute)
 
 	fmt.Println("[SCALE-DOWN TEST] Beginning 5-minute low-load period...")
 	fmt.Println("  Sending 1 request every 10 seconds (minimal load)")
 	fmt.Println("  CPU load: <10%")
-	fmt.Println("  Request rate: ~0.1 req/s (far below 100 req/s threshold)\n")
+	fmt.Println("  Request rate: ~0.1 req/s (far below 100 req/s threshold)")
 
 	testDuration := 6 * time.Minute
 	startTime := time.Now()
@@ -1416,12 +1453,12 @@ func runScaleDownTest(config ScalingConfig, getActiveIPs func() []string) {
 	}
 
 	fmt.Println("\n[SCALE-DOWN TEST] Complete")
-	fmt.Println("[SCALE-DOWN TEST] Check scaler logs - should show scale-down triggered after 5-minute window\n")
+	fmt.Println("[SCALE-DOWN TEST] Check scaler logs - should show scale-down triggered after 5-minute window")
 }
 
 func runMetricsValidationTest(config ScalingConfig, getActiveIPs func() []string) {
 	fmt.Println("\n[METRICS VALIDATION TEST] Starting continuous metric validation...")
-	fmt.Println("  Verifies Prometheus format every 30 seconds\n")
+	fmt.Println("  Verifies Prometheus format every 30 seconds")
 
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()

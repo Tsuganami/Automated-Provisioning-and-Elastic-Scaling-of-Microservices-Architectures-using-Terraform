@@ -48,8 +48,8 @@
                 <div id="average-cpu" class="mt-2 text-3xl font-semibold text-amber-300">-</div>
             </div>
             <div class="rounded-2xl border border-white/10 bg-slate-950/70 p-5 backdrop-blur">
-                <div class="text-xs uppercase tracking-[0.3em] text-slate-400">Request Rate</div>
-                <div id="request-rate" class="mt-2 text-3xl font-semibold text-cyan-300">-</div>
+                <div class="text-xs uppercase tracking-[0.3em] text-slate-400">Request Rate (req/min)</div>
+                <div id="request-rate" class="mt-2 text-3xl font-semibold text-cyan-300">- req/min</div>
             </div>
         </div>
 
@@ -91,6 +91,7 @@
                 </div>
                 <div class="grid gap-3 md:grid-cols-3">
                     <button
+                        id="btn-cpu-load-test"
                         class="rounded-xl border border-amber-400/30 bg-amber-500/15 px-4 py-3 text-sm font-semibold text-amber-100 transition hover:bg-amber-500/25 active:bg-amber-500/35"
                         onclick="triggerCPULoadTest()"
                     >
@@ -134,6 +135,40 @@
         const instanceGrid = document.getElementById('instance-grid');
         const statusMessage = document.getElementById('status-message');
 
+        // Test durations are fetched once from the server (/api/test/durations)
+        // so the button labels stay in sync with the Go constants in deploy.go
+        // and the user_data values in main.tf.
+        const testDurations = {
+            work_burn_seconds: 30,
+            spike_seconds: 300,
+            cpu_load_seconds: 180,
+            health_fail_seconds: 120,
+        };
+
+        function formatDuration(totalSeconds) {
+            const s = Math.max(0, Math.floor(totalSeconds || 0));
+            if (s < 60) return `${s}s`;
+            const m = Math.floor(s / 60);
+            const rem = s % 60;
+            return rem === 0 ? `${m}m` : `${m}m ${rem}s`;
+        }
+
+        async function loadTestDurations() {
+            try {
+                const r = await fetch('/api/test/durations', { cache: 'no-store' });
+                if (!r.ok) return;
+                const d = await r.json();
+                Object.assign(testDurations, d);
+                const cpuBtn = document.getElementById('btn-cpu-load-test');
+                if (cpuBtn) {
+                    cpuBtn.textContent = `Start CPU Load Test (${formatDuration(testDurations.cpu_load_seconds)})`;
+                }
+                refreshDashboard();
+            } catch (_) {
+                /* keep defaults */
+            }
+        }
+
         function updateClock() {
             const now = new Date();
             const formatOpts = { 
@@ -166,20 +201,23 @@
             return 'border-emerald-500/30 bg-emerald-500/15 text-emerald-200';
         }
 
-        function formatUptime(seconds) {
-            if (seconds < 0) seconds = 0;
-            const days = Math.floor(seconds / 86400);
-            const hours = Math.floor((seconds % 86400) / 3600);
-            const minutes = Math.floor((seconds % 3600) / 60);
-            const secs = Math.floor(seconds % 60);
+        function formatUptime(startedAt) {
+            if (!startedAt) return '--:--:--';
+            const start = Date.parse(startedAt);
+            if (Number.isNaN(start)) return '--:--:--';
+            let seconds = Math.max(0, Math.floor((Date.now() - start) / 1000));
+            const days = Math.floor(seconds / 86400); seconds %= 86400;
+            const hours = Math.floor(seconds / 3600); seconds %= 3600;
+            const minutes = Math.floor(seconds / 60); seconds %= 60;
+            const pad = (n) => String(n).padStart(2, '0');
+            const hms = `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+            return days > 0 ? `${days}d ${hms}` : hms;
+        }
 
-            const parts = [];
-            if (days > 0) parts.push(`${days}d`);
-            if (hours > 0) parts.push(`${hours}h`);
-            if (minutes > 0) parts.push(`${minutes}m`);
-            if (secs > 0 || parts.length === 0) parts.push(`${secs}s`);
-
-            return parts.slice(0, 2).join(' ');
+        function tickUptimes() {
+            document.querySelectorAll('[data-started-at]').forEach((el) => {
+                el.textContent = formatUptime(el.dataset.startedAt);
+            });
         }
 
         function renderInstances(instances) {
@@ -192,11 +230,16 @@
                 const isStarting = instance.status === 'STARTING';
                 const colors = cpuClass(instance.cpu_percent || 0);
                 const width = Math.min(Math.max(instance.cpu_percent || 0, 0), 100);
-                const requestRate = Number.isFinite(instance.request_rate) ? (instance.request_rate * 60).toFixed(0) : '0';
-                const requestWidth = Math.min(Math.max((instance.request_rate || 0) * 60 / 25, 0), 100);
+                const requestRatePerMin = (instance.request_rate || 0) * 60;
+                const requestRate = Number.isFinite(instance.request_rate) ? requestRatePerMin.toFixed(0) : '0';
+                // Bar saturates at 1500 req/min per instance to match the
+                // synthetic test load (2400 req/min split across instances).
+                const requestWidth = Math.min(Math.max(requestRatePerMin / 1500 * 100, 0), 100);
                 const healthLabel = isStarting ? 'Instance starting' : (instance.healthy ? 'Healthy' : 'Attention required');
-                const buttonLabel = isStarting ? 'Instance is starting...' : 'Increase CPU Load';
-                const failHealthButtonLabel = isStarting ? 'Instance is starting...' : 'Fail Health Check (2m)';
+                const workLabel = `Increase CPU Load (${formatDuration(testDurations.work_burn_seconds)})`;
+                const failLabel = `Fail Health Check (${formatDuration(testDurations.health_fail_seconds)})`;
+                const buttonLabel = isStarting ? 'Instance is starting...' : workLabel;
+                const failHealthButtonLabel = isStarting ? 'Instance is starting...' : failLabel;
                 const rolePillClass = instance.role === 'LB-SENDER'
                     ? 'border-fuchsia-500/30 bg-fuchsia-500/15 text-fuchsia-100'
                     : 'border-cyan-500/30 bg-cyan-500/15 text-cyan-100';
@@ -213,13 +256,6 @@
                         </div>
 
                         <div class="space-y-4">
-                            <div>
-                                <div class="mb-2 flex items-center justify-between text-sm">
-                                    <span class="text-slate-400">Uptime</span>
-                                    <span class="font-mono text-slate-100">${formatUptime(instance.uptime_seconds || 0)}</span>
-                                </div>
-                            </div>
-
                             ${instance.role !== 'LB-SENDER' ? `
                             <div>
                                 <div class="mb-2 flex items-center justify-between text-sm">
@@ -240,6 +276,11 @@
                                     <div class="h-full rounded-full bg-gradient-to-r from-cyan-500 to-blue-500" style="width: ${requestWidth}%"></div>
                                 </div>
                             </div>` : ''}
+
+                            <div class="flex items-center justify-between rounded-xl border border-white/10 bg-slate-900/40 px-3 py-2 text-sm">
+                                <span class="text-slate-400">Uptime</span>
+                                <span class="font-mono text-slate-100" data-started-at="${instance.started_at || ''}">${formatUptime(instance.started_at)}</span>
+                            </div>
 
                             <div class="flex items-center justify-between rounded-xl border px-3 py-2 text-sm ${colors.badge}">
                                 <span>Health</span>
@@ -291,7 +332,7 @@
 
         async function triggerHealthFail(ip) {
             try {
-                const response = await fetch(`/api/fail-health?ip=${encodeURIComponent(ip)}&seconds=120`, {
+                const response = await fetch(`/api/fail-health?ip=${encodeURIComponent(ip)}&seconds=${testDurations.health_fail_seconds}`, {
                     method: 'POST'
                 });
 
@@ -460,9 +501,11 @@
 
 
         updateClock();
+        loadTestDurations();
         refreshDashboard();
         setInterval(updateClock, 1000);
         setInterval(refreshDashboard, 5000);
+        setInterval(tickUptimes, 1000);
     </script>
 </body>
 </html>
